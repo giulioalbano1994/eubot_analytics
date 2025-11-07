@@ -1,0 +1,19 @@
+# --- Environment ---
+.venv/
+__pycache__/
+.env
+
+# --- OS / IDE ---
+.vscode/
+.DS_Store
+
+# --- Data / Cache ---
+data/
+*.db
+*.csv
+*.log
+
+# --- Python artifacts ---
+*.pyc
+*.pyo
+*.pyd

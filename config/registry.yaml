@@ -1,0 +1,23 @@
+# Mappa degli indicatori disponibili e loro dataset SDMX
+
+indicators:
+  inflazione:
+    provider: ECB
+    flow: ICP
+    description: "Indice dei prezzi al consumo (HICP) - Area euro"
+  tasso_deposito:
+    provider: ECB
+    flow: FM
+    description: "Tasso di deposito BCE"
+  cambio_eurusd:
+    provider: ECB
+    flow: EXR
+    description: "Tasso di cambio EUR/USD"
+  pil:
+    provider: Eurostat
+    flow: namq_10_gdp
+    description: "Prodotto interno lordo trimestrale"
+  disoccupazione:
+    provider: Eurostat
+    flow: une_rt_m
+    description: "Tasso di disoccupazione mensile"
