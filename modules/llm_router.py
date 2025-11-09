@@ -1,144 +1,139 @@
-"""
-=============================================================
-Module: llm_router.py
-=============================================================
-
-🧠 Purpose:
-    Interpret user messages in natural language and convert them
-    into a structured "query plan" for the data fetchers (ECB / Eurostat).
-
-⚙️ Logic:
-    1️⃣ Try to interpret the text using the AI parser (OpenAI GPT)
-       → modules.ai_parser.interpret_query_with_ai()
-    2️⃣ If AI parsing fails, fall back to a static dictionary
-    3️⃣ Return a unified dictionary:
-        {
-          provider, flow, series, freq, indicator, params?
-        }
-
-🗣️ Expected input language: English
-=============================================================
-"""
+# ==============================================================
+# Module: llm_router.py  (v6 – Unified Intelligent Router)
+# ==============================================================
+# 🧠 Purpose:
+#   Bridge between user messages and structured query plans.
+#   Now supports ECB + Eurostat indicators (via ai_parser_unified).
+#
+# ✅ Features:
+#   - Detects chart/comparison/growth intent
+#   - Handles multi-country and multi-indicator queries
+#   - Uses LLM ONLY for intent understanding (not query codes)
+# ==============================================================
 
 import logging
+import re
 from modules.ai_parser import interpret_query_with_ai
 
-# -------------------------------------------------------------
-# 1. Logging setup
-# -------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------
-# 2. Minimal static fallback dictionary
+# Helper: detect chart / comparison / analysis intent
 # -------------------------------------------------------------
-FALLBACK_PATTERNS = {
-    "inflation": {
+def detect_chart_mode(text: str) -> str:
+    """Detect whether the user wants a comparison or trend."""
+    t = text.lower()
+    if re.search(r"\b(compare|vs|versus|between|and)\b", t):
+        return "compare"
+    if re.search(r"\btrend|evolution|change|growth|rise|increase|fall|decline\b", t):
+        return "trend"
+    return "single"
+
+def detect_analysis_type(text: str) -> str:
+    """Detect if the analysis is focused on growth, decline, or neutral."""
+    t = text.lower()
+    if any(k in t for k in ["growth", "increase", "rise", "expansion", "improve"]):
+        return "growth"
+    if any(k in t for k in ["decline", "drop", "decrease", "fall", "slowdown", "recession"]):
+        return "decline"
+    if any(k in t for k in ["compare", "vs", "versus", "difference"]):
+        return "comparison"
+    return "neutral"
+
+def detect_countries_in_text(text: str):
+    """Extract country names if multiple are present."""
+    t = text.lower()
+    countries = []
+    for c in [
+        "italy","france","germany","spain","portugal","belgium",
+        "netherlands","austria","greece","ireland","finland","luxembourg",
+        "poland","sweden","denmark","romania","hungary","slovakia",
+        "slovenia","croatia","bulgaria","euro area","eurozone"
+    ]:
+        if c in t:
+            countries.append(c)
+    return list(set(countries))
+
+# -------------------------------------------------------------
+# Core Router
+# -------------------------------------------------------------
+def parse_message_to_query(user_text: str):
+    """
+    Parse a natural-language message into one or more structured query plans.
+    Uses ai_parser_unified.interpret_query_with_ai() for typed indicator lookup.
+    """
+    if not user_text or not user_text.strip():
+        return _default_plan()
+
+    text = user_text.strip()
+    logger.info(f"🧠 Routing user message: {text}")
+
+    # 1️⃣ Detect general context
+    chart_mode = detect_chart_mode(text)
+    analysis_type = detect_analysis_type(text)
+    countries = detect_countries_in_text(text)
+    multi_country = len(countries) > 1
+
+    # 2️⃣ Try to parse via AI Parser (ECB + Eurostat unified)
+    try:
+        query_plan = interpret_query_with_ai(text)
+    except Exception as e:
+        logger.warning(f"⚠️ AI parser failed: {e}")
+        query_plan = None
+
+    # 3️⃣ Handle returned plan
+    if isinstance(query_plan, dict):
+        query_plan["chart_mode"] = chart_mode
+        query_plan["analysis_type"] = analysis_type
+        if multi_country:
+            query_plan["compare_mode"] = "multi-country"
+            query_plan["countries"] = countries
+        logger.info(f"✅ Routed single query → {query_plan.get('indicator', 'Unknown')}")
+        return query_plan
+
+    if isinstance(query_plan, list):
+        for qp in query_plan:
+            qp["chart_mode"] = chart_mode
+            qp["analysis_type"] = analysis_type
+            if multi_country:
+                qp["compare_mode"] = "multi-country"
+                qp["countries"] = countries
+        logger.info(f"✅ Routed multi-query ({len(query_plan)} indicators)")
+        return query_plan
+
+    # 4️⃣ If everything fails → fallback to inflation Euro area
+    logger.warning("⚠️ No valid match found. Using default inflation plan.")
+    return _default_plan(chart_mode, analysis_type)
+
+# -------------------------------------------------------------
+# Default fallback plan
+# -------------------------------------------------------------
+def _default_plan(chart_mode="single", analysis_type="neutral"):
+    return {
         "provider": "ECB",
         "flow": "ICP",
         "series": "M.U2.N.000000.4.ANR",
         "freq": "M",
-        "indicator": "Euro area inflation (HICP)",
-        "params": {"lastNObservations": 24},
-    },
-    "deposit": {
-        "provider": "ECB",
-        "flow": "FM",
-        "series": "D.U2.EUR.4F.KR.DFR.LEV",
-        "freq": "D",
-        "indicator": "Deposit Facility Rate (DFR)",
-        "params": {"lastNObservations": 180},
-    },
-    "exchange": {
-        "provider": "ECB",
-        "flow": "EXR",
-        "series": "D.USD.EUR.SP00.A",
-        "freq": "D",
-        "indicator": "EUR/USD Exchange Rate",
-        "params": {"lastNObservations": 60},
-    },
-    "gdp": {
-        "provider": "Eurostat",
-        "flow": "namq_10_gdp",
-        "freq": "Q",
-        "indicator": "Gross Domestic Product (Eurostat)",
-        "params": {"startPeriod": "2020"},
-    },
-    "unemployment": {
-        "provider": "Eurostat",
-        "flow": "une_rt_m",
-        "freq": "M",
-        "indicator": "Unemployment rate (Eurostat)",
-        "params": {"startPeriod": "2020"},
-    },
-}
-
-# -------------------------------------------------------------
-# 3. Main function
-# -------------------------------------------------------------
-def parse_message_to_query(text: str) -> dict:
-    """
-    Parse a natural language query into a structured 'query plan'.
-
-    Steps:
-    1. Try with AI parser (GPT)
-    2. If it fails, use static keyword fallback
-    3. Return a valid dict ready for fetchers
-    """
-    if not text:
-        logger.warning("⚠️ Empty input text received.")
-        return {
-            "provider": "ECB",
-            "flow": "ICP",
-            "series": "M.U2.N.000000.4.ANR",
-            "freq": "M",
-            "indicator": "Euro area inflation (default)",
-            "params": {"lastNObservations": 12},
-        }
-
-    text_lower = text.lower().strip()
-    logger.info(f"🧠 Parsing message: '{text_lower}'")
-
-    # --- 1️⃣ AI-based parsing ---
-    ai_result = interpret_query_with_ai(text)
-    if ai_result:
-        logger.info("✅ AI interpretation successful (via ai_parser)")
-        # Normalize optional fields
-        ai_result.setdefault("params", {"lastNObservations": 24})
-        ai_result.setdefault("series", "")
-        return ai_result
-
-    # --- 2️⃣ Static fallback ---
-    for keyword, plan in FALLBACK_PATTERNS.items():
-        if keyword in text_lower:
-            logger.info(f"✅ Fallback match found for '{keyword}': {plan}")
-            return plan
-
-    # --- 3️⃣ Default response ---
-    fallback = {
-        "provider": "ECB",
-        "flow": "ICP",
-        "series": "M.U2.N.000000.4.ANR",
-        "freq": "M",
-        "indicator": "Euro area inflation (default)",
+        "indicator": "Inflation (Euro area, default)",
         "params": {"lastNObservations": 12},
+        "chart_mode": chart_mode,
+        "analysis_type": analysis_type,
+        "compare_mode": "none"
     }
-    logger.warning(f"⚠️ No match found. Using fallback: {fallback}")
-    return fallback
-
 
 # -------------------------------------------------------------
-# 4. Test helper (optional)
+# Local test
 # -------------------------------------------------------------
 if __name__ == "__main__":
-    print(">>> Quick test for parse_message_to_query()")
-    samples = [
-        "Show me the euro area inflation since 2020",
-        "EUR/USD exchange rate last month",
-        "What is the ECB deposit rate?",
-        "Euro area GDP quarterly data",
-        "Unemployment in Italy",
+    examples = [
+        "Inflation in Italy and France since 2020",
+        "GDP growth Germany vs Spain",
+        "Compare unemployment between France and Italy",
+        "ECB deposit rate trend after 2022",
+        "Show me euro usd exchange rate last 6 months",
+        "Poverty rate in Euro area",
+        "Employment and inflation Italy since 2015",
     ]
-    for q in samples:
-        print(f"\n🗨️ Query: {q}")
-        result = parse_message_to_query(q)
-        print(result)
+    for q in examples:
+        print(f"\n🗨️ {q}")
+        print(parse_message_to_query(q))
