@@ -1,20 +1,248 @@
-# 🧠 Euro DataBot
+Euro DataBot — Telegram Bot for ECB and Eurostat Data
 
-Telegram bot for querying and visualizing ECB and Eurostat data using:
-- **Python + Aiogram 3**
-- **Pandas + Matplotlib**
-- **OpenAI GPT for natural language query interpretation**
+Telegram bot to query and visualize macroeconomic and financial data from:
 
-## 🚀 Quick Start
+European Central Bank (ECB Data Portal)
 
-```bash
-# clone repo
-git clone https://github.com/<your_username>/eubot_analytics.git
-cd eubot_analytics
+Eurostat
 
-# create virtual env
+🧠 Overview
+
+Goal: enable natural-language queries such as
+
+“Inflation Italy since 2020” or “EUR/USD last year”
+
+and return:
+
+a time-series chart, and
+
+a short analytic summary, optionally powered by GPT.
+
+⚙️ Core Stack
+
+Python 3.10+
+
+Aiogram 3 – Telegram bot framework
+
+Pandas, Matplotlib, Geopandas (for maps)
+
+OpenAI GPT (optional) – natural-language intent & summaries
+
+SDMX REST APIs – ECB and Eurostat data backends
+
+🧩 Didactic Principles
+
+SDMX standard: both ECB and Eurostat expose data via SDMX REST.
+
+Series key: an ECB series is FLOW.KEY (e.g. ICP.M.U2.N.000000.4.ANR),
+where “flow” is the dataset domain and “key” encodes dimensions.
+
+Frequency & period: D (daily), M (monthly), Q (quarterly), A (annual).
+The parser detects “since 2020”, “last 12 months”, etc.
+
+Hybrid router: intent detected via deterministic rules (synonyms, regex)
+with an optional lightweight LLM for classification (not SDMX codes).
+
+Normalization: all datasets → TIME_PERIOD, OBS_VALUE, COUNTRY.
+
+Visualization: Matplotlib charts; optional map rendering via Geopandas.
+
+Robustness: ECB fetcher supports JSON→CSV fallback;
+Eurostat handles aliases (EA20, EA19, EA, U2).
+
+🧱 Architecture
+Entry ( Telegram )
+
+main.py — bot entrypoint
+
+modules/telegram_bot.py — commands, inline menus, message handling
+
+Query Interpretation
+
+modules/llm_router.py — detects mode (single/compare/trend), analysis type, and countries
+
+modules/ai_parser.py — indicator catalog + synonyms + unified ECB/Eurostat interpreter (optional GPT classifier)
+
+Data
+
+modules/fetchers/ecb_adapter.py — ECB fetch + normalization (JSON→CSV fallback)
+
+modules/fetchers/eurostat_adapter.py — Eurostat fetch + normalization
+
+Output
+
+modules/plotter.py — charts and maps
+
+modules/data_commenter.py — analytic summary (AI or numeric fallback)
+
+Config
+
+config/settings.py — environment variables (.env)
+
+config/registry.yaml — example indicator registry
+
+config/prompts/router_prompt.txt — LLM routing prompt (used only if enabled)
+
+🔄 Request Lifecycle
+
+User message: “Inflation Euro area since 2020”
+
+Router: detects intent, countries, and chart type
+
+Parser: builds structured plan — provider, flow/dataset, series/pattern, period params
+
+Fetcher: retrieves ECB or Eurostat data and normalizes
+
+Plotter: creates Matplotlib chart → PNG buffer
+
+Commenter: generates 3-line analytic summary (GPT or numeric fallback)
+
+Telegram reply: sends chart + summary to the user
+
+🧰 Installation
+
+Requirements
+
+Python 3.10 or higher
+
+Dependencies in requirements.txt:
+
+aiogram
+pandas
+matplotlib
+requests
+openai
+python-dotenv
+ecbdata
+geopandas  # optional for maps
+
+
+Setup
+
 python -m venv .venv
-.venv\Scripts\activate
-
-# install deps
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
+
+🔑 Configuration
+
+Environment variables (via .env, loaded by config/settings.py):
+
+Variable	Required	Description
+TELEGRAM_TOKEN	✅	BotFather token
+OPENAI_API_KEY	⛔ optional	Enables GPT classification & summaries
+
+⚠️ Note: only one bot instance can poll updates at a time —
+stop any previous session before relaunching.
+
+▶️ Run
+python main.py
+
+
+The bot logs startup and awaits updates.
+Use Telegram to send either menu selections or natural-language queries.
+
+💬 Example Queries
+
+English
+
+Inflation Euro area since 2020
+ECB deposit rate, last 12 months
+EUR/JPY exchange rate
+GDP per capita Euro area
+Compare unemployment between France and Italy
+
+
+Italian
+
+Inflazione area euro dal 2020
+Tasso di deposito BCE
+Disoccupazione Italia
+Cambio euro dollaro ultimo anno
+
+📈 Supported Indicators (excerpt)
+
+See modules/ai_parser.py:
+
+INDICATOR_CATALOG (line 80) → data sources
+
+SYNONYMS (line 130) → text mapping
+
+Examples:
+
+ECB: inflation (ICP), deposit rate (FM), money supply (BSI), loans, 10y yield curve (YC), FX (EXR).
+
+Eurostat: unemployment, employment, debt/GDP, industrial production, poverty rate.
+
+🗺️ Charts and Maps
+
+Time-series: plotted with Matplotlib (function plot_timeseries)
+
+Maps: optional (requires Geopandas), function plot_map
+uses ISO-A2 codes (IT, FR, DE, etc.) with alias handling for UK/GB.
+
+🧮 Robustness & Fallbacks
+
+ECB: JSON→CSV fallback via ecbdata; local cache under data/cache/
+
+Eurostat: SDMX JSON expansion → tidy records; handles EA aliases
+
+Parser: fallback to Euro Area inflation if no match found
+
+Summaries: deterministic numeric bullets when GPT unavailable
+
+🧠 Extend the Bot
+
+Add a new indicator:
+
+Edit INDICATOR_CATALOG in modules/ai_parser.py
+
+provider: ECB or Eurostat
+
+For ECB: add flow, series, freq
+
+For Eurostat: add dataset, base params
+
+Add synonyms in SYNONYMS (same file).
+
+(Optional) enable LLM classification for fuzzy queries.
+
+📂 Repository Structure
+File	Description
+main.py	Entrypoint
+modules/telegram_bot.py	Telegram logic (commands/menus/replies)
+modules/llm_router.py	Intent routing and context
+modules/ai_parser.py	Indicator catalog & unified ECB/Eurostat interpreter
+modules/fetchers/ecb_adapter.py	ECB fetch + normalization
+modules/fetchers/eurostat_adapter.py	Eurostat fetch + normalization
+modules/plotter.py	Charts and maps
+modules/data_commenter.py	AI or fallback summary
+config/settings.py	Environment variables
+config/registry.yaml	Example indicator registry
+config/prompts/router_prompt.txt	Routing prompt (if LLM enabled)
+⚠️ Limits and Notes
+
+Data quality depends on ECB/Eurostat availability.
+
+LLM classification is only an aid; mapping lives in the catalog.
+
+GPT usage incurs costs — validate keys and monitor.
+
+Encoding: avoid non-standard emojis in stored text for portability.
+
+🔗 References
+
+ECB Data Portal (SDMX): https://data.ecb.europa.eu/
+
+Eurostat API: https://ec.europa.eu/eurostat/
+
+SDMX Standard: https://sdmx.org/
+
+Aiogram Docs: https://docs.aiogram.dev/
+
+Pandas: https://pandas.pydata.org/
+
+Matplotlib: https://matplotlib.org/
+
+Geopandas: https://geopandas.org/
+
+✅ End of README (English final version)

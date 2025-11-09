@@ -78,6 +78,13 @@ INDICATOR_CATALOG = {
         "freq": "Q",
         "label": "Real GDP (chain-linked)"
     },
+    "gdp_per_capita": {
+        "provider": "ECB",
+        "flow": "MNA",
+        "series": "A.N.I9.W2.S1.S1.B.B1GQ._Z._Z._Z.PE_R_POP.V._Z",
+        "freq": "A",
+        "label": "GDP per capita (Purchasing Power Standards, Euro area)"
+    },
     "inflation": {
         "provider": "ECB",
         "flow": "ICP",
@@ -98,16 +105,16 @@ INDICATOR_CATALOG = {
         "label": "Employment rate"
     },
     "poverty_rate": {
-        "provider": "Eurostat",
-        "dataset": "ilc_li02",
-        "params": {"indic_il": "LI_R_MD60", "unit": "PC"},
-        "label": "Poverty rate (60% median income)"
+    "provider": "Eurostat",
+    "dataset": "ilc_peps01",
+    "params": {"unit":"PC","sex":"T","age":"TOTAL"},
+    "label": "Population at risk of poverty or social exclusion (% of total)"
     },
     "debt_gdp": {
-        "provider": "Eurostat",
-        "dataset": "gov_10q_ggdebt",
-        "params": {"sector": "S13", "unit": "PC_GDP", "na_item": "GD_NAC"},
-        "label": "Government debt (% GDP)"
+    "provider": "Eurostat",
+    "dataset": "gov_10q_ggdebt",
+    "params": {"sector":"S13","unit":"PC_GDP"},
+    "label": "Government debt (% GDP)"
     },
     "industrial_production": {
         "provider": "Eurostat",
@@ -184,7 +191,10 @@ INDICATOR_CATALOG = {
 SYNONYMS = {
     # ==== ECONOMIC ====
     "gdp_real": [
-        "gdp", "gross domestic product", "economic growth"
+        "real gdp", "volume gdp", "gdp constant prices", "economic growth"
+    ],
+    "gdp_per_capita": [
+        "gdp per capita", "income per person", "purchasing power", "pps gdp", "per capita gdp"
     ],
     "inflation": [
         "inflation", "hicp", "prices", "consumer prices", "price level"

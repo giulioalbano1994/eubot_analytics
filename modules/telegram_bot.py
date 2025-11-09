@@ -18,6 +18,8 @@ from modules.ai_parser import interpret_query_with_ai
 from modules.fetchers.ebc_adapter import fetch_ecb_data
 from modules.plotter import plot_timeseries, plot_map
 from modules.data_commenter import summarize_trend
+from modules.fetchers.eurostat_adapter import fetch_eurostat_data
+
 
 # --------------------------------------------------------------
 # Setup
@@ -42,7 +44,7 @@ def menu_root() -> InlineKeyboardMarkup:
 def menu_econ() -> InlineKeyboardMarkup:
     pairs = [
         ("📈 Real GDP — Euro Area", "ex: GDP Euro area since 2015"),
-        ("💵 Nominal GDP — Euro Area", "ex: Nominal GDP Euro area since 2015"),
+        ("💵 GDP per capita (PPS) — Euro Area", "ex: GDP per capita Euro area since 2015"),
         ("📉 Inflation (HICP YoY) — Euro Area", "ex: Inflation Euro area since 2020"),
         ("👥 Unemployment Rate — Euro Area", "ex: Unemployment Euro area since 2018"),
         ("👔 Employment Rate — Euro Area", "ex: Employment rate Euro area since 2018"),
@@ -181,56 +183,72 @@ async def process_text_query(message: types.Message, text: str):
 
 async def _handle_single_query(message: types.Message, query: dict):
     indicator = query.get("indicator", "Indicatore")
-    provider = query.get("provider", "ECB")
-    # Caso Eurostat: placeholder
-    if provider.lower().startswith("eurostat"):
-        await message.answer(
-            f"📌 *{indicator}*\n"
-            "Questo indicatore proviene da *Eurostat* e sarà presto disponibile.\n"
-            "L'integrazione sarà attiva nel prossimo aggiornamento.",
-            parse_mode="Markdown",
-        )
-        return
-    await message.answer(f"🏦 Recupero dati da *{provider}* per *{indicator}*…", parse_mode="Markdown")
+    provider  = query.get("provider", "ECB")
+    flow      = query.get("flow")
+    series    = query.get("series")
+    params    = query.get("params", {"lastNObservations": 24})
+
+    # Caso “POVERTY_RATE_EUROSTAT” non serve più: ora lo prendiamo davvero
+    # Pulizia “ex: …”
+    if isinstance(series, str) and series.startswith("ex: "):
+        text_query = series.replace("ex: ", "").strip()
+        return await process_text_query(message, text_query)
+
+    await message.answer(f"📡 Fetch *{indicator}* from {provider}…", parse_mode="Markdown")
     try:
-        df = fetch_ecb_data(query.get("flow"), query.get("series"), query.get("params", {}))
+        if provider == "ECB":
+            df = fetch_ecb_data(flow, series, params)  # la tua funzione esistente
+        else:
+            # Eurostat
+            dataset = query.get("dataset")
+            eparams = query.get("params", {})
+            df = fetch_eurostat_data(dataset, eparams)
+
         if df is None or df.empty:
-            await message.answer("⚠️ Nessun dato disponibile per questa query.", parse_mode="Markdown")
+            await message.answer("⚠️ Nessun dato restituito.", parse_mode="Markdown")
             return
-        country_col = "COUNTRY"
-        time_col = "TIME_PERIOD"
-        multi_country = df[country_col].nunique() > 1
-        single_time = df[time_col].nunique() == 1
-        make_map = multi_country and single_time
-        # Grafico
-        if make_map:
+
+        # Uniformiamo colonne per il plotter esistente:
+        # - se il df arriva già con TIME_PERIOD/OBS_VALUE/COUNTRY non facciamo nulla
+        # - se arriva come tua pipeline ECB, fai mapping qui sotto se serve
+        country_col = "COUNTRY" if "COUNTRY" in df.columns else "COUNTRY"
+        time_col    = "TIME_PERIOD" if "TIME_PERIOD" in df.columns else "TIME_PERIOD"
+        value_col   = "OBS_VALUE" if "OBS_VALUE" in df.columns else "OBS_VALUE"
+
+        multi_country = country_col in df.columns and df[country_col].nunique() > 1
+        single_time   = df[time_col].nunique() == 1
+
+        if multi_country and single_time:
             buf = plot_map(df, indicator)
         else:
             if multi_country:
-                pivot = df.pivot_table(index=time_col, columns=country_col, values="OBS_VALUE").sort_index()
+                pivot = df.pivot_table(index=time_col, columns=country_col, values=value_col).sort_index()
                 buf = plot_timeseries(pivot, title=indicator)
-                df = pivot.reset_index().melt(id_vars=time_col, var_name=country_col, value_name="OBS_VALUE")
+                df = pivot.reset_index().melt(id_vars=time_col, var_name=country_col, value_name=value_col)
             else:
-                buf = plot_timeseries(df, title=indicator)
-        # Pulsante opzionale “Mostra Mappa”
+                # Se il tuo plotter accetta anche serie “time/value” rinomina:
+                ts = df.rename(columns={time_col:"TIME_PERIOD", value_col:"OBS_VALUE"})
+                buf = plot_timeseries(ts, title=indicator)
+
         keyboard = None
-        if not make_map and multi_country:
+        if not (multi_country and single_time) and multi_country:
             keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🌍 Mostra Mappa", callback_data=f"show_map:{indicator}")]]
+                inline_keyboard=[[InlineKeyboardButton(text="🌍 Show map", callback_data=f"show_map:{indicator}")]]
             )
             LAST_DATASETS[indicator] = df
-        # Invio grafico
+
         photo = BufferedInputFile(buf.getvalue(), filename="chart.png")
         await message.answer_photo(
             photo=photo,
-            caption=f"{indicator}\n_Fonte: ECB Data Portal — CC BY 4.0_",
+            caption=f"{indicator}\n_Fonte: {'ECB Data Portal' if provider=='ECB' else 'Eurostat'} (CC BY 4.0)_",
             parse_mode="Markdown",
-            reply_markup=keyboard,
+            reply_markup=keyboard
         )
-        # Commento GPT / fallback
+
         summary = summarize_trend(df, indicator_name=indicator)
         if summary:
             await message.answer(summary, parse_mode="Markdown")
+
     except Exception as e:
         logging.exception("❌ Errore nel recupero dati:")
         await message.answer(f"❌ Errore durante il recupero dei dati:\n`{e}`", parse_mode="Markdown")

@@ -1,175 +1,92 @@
-"""
-=============================================================
-Module: eurostat_adapter.py  (Enhanced Stable Version)
-=============================================================
-- Compatibile con API Eurostat 1.0 (SDMX-JSON)
-- Caching automatico per query ripetute
-- Rilevamento frequenza (A/Q/M)
-- Gestione errori robusta
-=============================================================
-"""
-
-import os
-import re
-import json
-import hashlib
-import requests
+# modules/fetchers/eurostat_adapter.py
 import itertools
-import pandas as pd
-from collections import OrderedDict
-from datetime import datetime
 import logging
+import requests
+import pandas as pd
 
 logger = logging.getLogger(__name__)
-BASE = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
 
-# Directory cache locale
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "_cache_eurostat")
-os.makedirs(CACHE_DIR, exist_ok=True)
+EUROSTAT_BASE = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
 
+# Fallback per “Euro area” che su Eurostat è EA20 (dal 2023), poi EA19…
+_EA_ALIASES = ["EA20", "EA19", "EA", "U2"]
 
-# -------------------------------------------------------------
-# Helper: espansione SDMX JSON → tidy DataFrame
-# -------------------------------------------------------------
-def _expand_sdmx_json(j):
-    """Espande SDMX-JSON (Eurostat API) in DataFrame pulito e leggibile."""
+def _expand_eurostat_json(j):
+    """Espande SDMX-JSON Eurostat in tidy records."""
+    if "value" not in j: 
+        return pd.DataFrame()
     dims = j["dimension"]
-    dim_names = [d for d in dims.keys() if d not in ["id", "size"]]
-
-    codes_by_dim = OrderedDict()
-    labels_by_dim = {}
-    for dim in dim_names:
-        index = dims[dim]["category"]["index"]
-        ordered_codes = [code for code, _ in sorted(index.items(), key=lambda kv: kv[1])]
-        codes_by_dim[dim] = ordered_codes
-        labels_by_dim[dim] = dims[dim]["category"].get("label", {})
-
-    values = list(j["value"].values()) if isinstance(j["value"], dict) else j["value"]
-    combos = list(itertools.product(*[codes_by_dim[dim] for dim in dim_names]))
-
-    records = []
+    dim_order = [d for d in dims.keys() if d not in ("id","size")]
+    labels = {d: dims[d]["category"]["label"] for d in dim_order}
+    keys = [list(dims[d]["category"]["index"].keys()) for d in dim_order]
+    combos = list(itertools.product(*keys))
+    vals = list(j["value"].values()) if isinstance(j["value"], dict) else j["value"]
+    out = []
     for i, combo in enumerate(combos):
-        if i >= len(values):
-            break
-        rec = {}
-        for d_i, dim in enumerate(dim_names):
-            code = combo[d_i]
-            label = labels_by_dim[dim].get(code, code)
-            rec[f"{dim}_code"] = code
-            rec[dim] = label
-        rec["value"] = values[i]
-        records.append(rec)
+        if i >= len(vals): break
+        rec = {dim: labels[dim][combo[k]] for k, dim in enumerate(dim_order)}
+        rec["OBS_VALUE"] = vals[i]
+        out.append(rec)
+    return pd.DataFrame(out)
 
-    df = pd.DataFrame(records)
-    code_cols = [f"{d}_code" for d in dim_names]
-    label_cols = dim_names
-    df = df[code_cols + label_cols + ["value"]]
+def _to_period(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalizza TIME → TIME_PERIOD (datetime) e OBS_VALUE numerico."""
+    if "time" in df.columns:
+        df = df.rename(columns={"time":"TIME_PERIOD"})
+    elif "TIME_PERIOD" not in df.columns:
+        # Individua colonna tempo tipica (“time” o simili)
+        for c in df.columns:
+            if c.lower() in ("time","time_period","period"):
+                df = df.rename(columns={c:"TIME_PERIOD"})
+                break
+    # trimestri → date, anni → 01-01, mesi → primo giorno
+    s = df["TIME_PERIOD"].astype(str)
+    s = s.str.replace("-Q1","-01-01").str.replace("-Q2","-04-01") \
+         .str.replace("-Q3","-07-01").str.replace("-Q4","-10-01")
+    # Se è solo anno, aggiungi “-01-01”
+    s = s.where(s.str.contains("-"), s + "-01-01")
+    df["TIME_PERIOD"] = pd.to_datetime(s, errors="coerce")
+    df["OBS_VALUE"] = pd.to_numeric(df.get("OBS_VALUE"), errors="coerce")
+    df = df.dropna(subset=["TIME_PERIOD","OBS_VALUE"]).sort_values("TIME_PERIOD")
     return df
 
+def fetch_eurostat_data(dataset: str, params: dict) -> pd.DataFrame:
+    """
+    Scarica un dataset Eurostat e restituisce:
+    columns = [TIME_PERIOD, OBS_VALUE, COUNTRY]
+    """
+    geo = params.get("geo")
+    tries = [geo] if geo else []
+    # Se geo è “EA”/“U2” prova alias; se è un paese, usa quello soltanto
+    if geo in ("EA","U2", None):
+        tries = _EA_ALIASES
+    seen_any = False
 
-# -------------------------------------------------------------
-# Cache: salva e ricarica risultati API
-# -------------------------------------------------------------
-def _cache_key(dataset: str, params: dict) -> str:
-    key = dataset + json.dumps(params, sort_keys=True)
-    return hashlib.md5(key.encode()).hexdigest()
-
-
-def _read_cache(key: str) -> pd.DataFrame | None:
-    path = os.path.join(CACHE_DIR, f"{key}.parquet")
-    if os.path.exists(path):
-        try:
-            return pd.read_parquet(path)
-        except Exception:
-            return None
-    return None
-
-
-def _write_cache(key: str, df: pd.DataFrame):
-    path = os.path.join(CACHE_DIR, f"{key}.parquet")
-    try:
-        df.to_parquet(path, index=False)
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to cache Eurostat data: {e}")
-
-
-# -------------------------------------------------------------
-# Main fetcher: Eurostat API 1.0
-# -------------------------------------------------------------
-def fetch_eurostat_data(dataset: str, params=None, years_back=5) -> pd.DataFrame:
-    """Fetch Eurostat dataset via JSON API 1.0, with local caching."""
-    qs = {"format": "JSON", "lang": "EN"}
-    if params:
-        qs.update(params)
-
-    # Limita periodo a ultimi N anni se non specificato
-    start_year = datetime.now().year - years_back
-    if "time" not in qs and "sinceTimePeriod" not in qs:
-        qs["sinceTimePeriod"] = str(start_year)
-
-    cache_id = _cache_key(dataset, qs)
-    cached = _read_cache(cache_id)
-    if cached is not None:
-        logger.info(f"🗃️ Loaded Eurostat data from cache ({len(cached)} rows).")
-        return cached
-
-    url = BASE + dataset
-    logger.info(f"📡 Fetching Eurostat data: {url} | params={qs}")
-
-    try:
+    for g in tries:
+        qs = {"format":"JSON", "lang":"EN", **{k:v for k,v in params.items() if k!="geo"}, "geo": g}
+        url = EUROSTAT_BASE + dataset
         r = requests.get(url, params=qs, timeout=60)
-        r.raise_for_status()
-        j = r.json()
-    except Exception as e:
-        logger.error(f"Eurostat API error: {e}")
-        return pd.DataFrame()
+        if r.status_code != 200:
+            logger.warning(f"Eurostat {dataset} geo={g} → HTTP {r.status_code}")
+            continue
+        seen_any = True
+        df_raw = _expand_eurostat_json(r.json())
+        if df_raw.empty: 
+            continue
+        # mappa “time” → TIME_PERIOD, cast numeri
+        df = _to_period(df_raw)
+        if df.empty: 
+            continue
+        # EUROSTAT usa “geo” come etichetta già espansa
+        country_col = "geo" if "geo" in df.columns else "GEO"
+        if country_col not in df.columns:
+            # proviamo a ricavarla da label/dimensioni
+            df[country_col] = g
+        df = df.rename(columns={country_col:"COUNTRY"})
+        df = df[["TIME_PERIOD","OBS_VALUE","COUNTRY"]]
+        logger.info(f"✅ Eurostat {dataset} ({g}) → {len(df)} obs")
+        return df
 
-    if "value" not in j:
-        logger.warning("⚠️ Eurostat returned no values.")
-        return pd.DataFrame()
-
-    df = _expand_sdmx_json(j)
-
-    # Parse date
-    if "time" in df.columns:
-        df["time"] = df["time"].astype(str)
-        df["date"] = pd.to_datetime(
-            df["time"]
-            .replace({"-Q1": "-01-01", "-Q2": "-04-01", "-Q3": "-07-01", "-Q4": "-10-01"}, regex=True),
-            errors="coerce"
-        )
-    else:
-        df["date"] = pd.NaT
-
-    # Rileva frequenza automatica
-    if len(df) > 0 and "time" in df.columns:
-        first = str(df["time"].iloc[0])
-        if "Q" in first:
-            freq = "Q"
-        elif re.match(r"^\d{4}-\d{2}$", first):
-            freq = "M"
-        else:
-            freq = "A"
-        df["freq"] = freq
-
-    # Normalizza colonne
-    df.rename(columns={"geo": "COUNTRY", "value": "OBS_VALUE"}, inplace=True)
-    df = df.dropna(subset=["date"])
-    df = df.sort_values("date")
-
-    tidy = df[["date", "COUNTRY", "OBS_VALUE"]].copy()
-    _write_cache(cache_id, tidy)
-
-    logger.info(f"✅ Eurostat data ready ({len(tidy)} rows, freq={df.get('freq', ['?'])[0]}).")
-    return tidy
-
-
-# -------------------------------------------------------------
-# Test locale
-# -------------------------------------------------------------
-if __name__ == "__main__":
-    df = fetch_eurostat_data(
-        "une_rt_m",
-        {"geo": "IT+FR", "sex": "T", "age": "Y25-74", "unit": "PC_ACT", "s_adj": "SA"}
-    )
-    print(df.tail())
+    if not seen_any:
+        raise SystemError(f"Eurostat {dataset} nessuna risposta valida (params={params})")
+    return pd.DataFrame(columns=["TIME_PERIOD","OBS_VALUE","COUNTRY"])
