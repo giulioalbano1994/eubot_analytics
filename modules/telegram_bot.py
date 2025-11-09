@@ -57,12 +57,11 @@ def menu_econ() -> InlineKeyboardMarkup:
 def menu_fin() -> InlineKeyboardMarkup:
     pairs = [
         ("🏦 Deposit Facility Rate (DFR)", "ex: ECB deposit rate"),
-        ("💳 Main Refinancing Rate (MRR)", "ex: Main refinancing rate ECB"),
-        ("💸 Marginal Lending Rate (MLR)", "ex: Marginal lending rate ECB"),
-        ("🏠 Loans to Households — Euro Area", "ex: Loans to households Euro area"),
-        ("🏢 Loans to Corporates — Euro Area", "ex: Loans to corporates Euro area"),
-        ("💵 Money Supply (M3) — Euro Area", "ex: Money supply Euro area"),
-        ("🔄 Overnight Rate (€STR)", "ex: Overnight rate ECB"),
+        ("🏛 Main Refinancing Operations – Fixed Rate", "ex: Main refinancing operations ECB"),
+        ("🏠 Cost of Borrowing for Households (House Purchase)", "ex: Cost of borrowing euro area"),
+        ("📈 Yield Curve – 10Y AAA Government Bond", "ex: 10-year bond yield euro area"),
+        ("💵 Money Supply (M3)", "ex: Money supply euro area"),
+        ("💳 Loans to Households", "ex: Loans to households euro area"),
     ]
     rows = [[InlineKeyboardButton(text=lbl, callback_data=qd)] for lbl, qd in pairs]
     rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:root")])

@@ -70,44 +70,171 @@ def detect_period(text: str) -> dict:
 # 🧾 Indicator catalog
 # -------------------------------------------------------------
 INDICATOR_CATALOG = {
-    # ---- ECONOMIC ----
-    "gdp_real":      {"provider": "ECB", "flow": "MNA", "series": "Q.N.I8.W2.S1.S1.B.B1GQ._Z._Z._Z.EUR.LR.N", "freq": "Q", "label": "Real GDP (chain-linked)"},
-    "inflation":     {"provider": "ECB", "flow": "ICP", "series": "M.U2.N.000000.4.ANR", "freq": "M", "label": "Inflation (HICP YoY)"},
-    "unemployment":  {"provider": "Eurostat", "dataset": "une_rt_m", "params": {"sex": "T","age":"Y25-74","unit":"PC_ACT","s_adj":"SA"}, "label": "Unemployment rate"},
-    "employment":    {"provider": "Eurostat", "dataset": "lfsi_emp_a", "params": {"indic_em":"EMP_LFS","sex":"T","age":"Y20-64","unit":"PC_POP"}, "label": "Employment rate"},
-    "poverty_rate":  {"provider": "Eurostat", "dataset": "ilc_li02", "params": {"indic_il":"LI_R_MD60","unit":"PC"}, "label": "Poverty rate (60% median income)"},
-    "debt_gdp":      {"provider": "Eurostat", "dataset": "gov_10q_ggdebt", "params": {"sector":"S13","unit":"PC_GDP","na_item":"GD_NAC"}, "label": "Government debt (% GDP)"},
-    "industrial_production": {"provider": "Eurostat", "dataset": "sts_inpr_m", "params": {"indic_bt":"PRD","nace_r2":"B-D","s_adj":"SCA","unit":"I15"}, "label": "Industrial production"},
-    # ---- FINANCIAL ----
-    "deposit_rate":  {"provider": "ECB", "flow": "FM", "series": "D.U2.EUR.4F.KR.DFR.LEV", "freq": "D", "label": "Deposit Facility Rate"},
-    "refinancing_rate": {"provider": "ECB", "flow": "FM", "series": "D.U2.EUR.4F.KR.MRR.LEV", "freq": "D", "label": "Main Refinancing Rate"},
-    "marginal_lending_rate": {"provider": "ECB", "flow": "FM", "series": "D.U2.EUR.4F.KR.MLR.LEV", "freq": "D", "label": "Marginal Lending Rate"},
-    "money_supply":  {"provider": "ECB", "flow": "BSI", "series": "M.U2.N.A.L40.X.I.U2.2300.Z01.E", "freq": "M", "label": "Money supply (M3)"},
-    "loans_households": {"provider": "ECB", "flow": "BSI", "series": "M.U2.N.A.A20.A.1.U2.2240.Z01.E", "freq": "M", "label": "Loans to households"},
-    "loans_corporates": {"provider": "ECB", "flow": "BSI", "series": "M.U2.N.A.A20.A.1.U2.2230.Z01.E", "freq": "M", "label": "Loans to corporates"},
-    # ---- MARKETS ----
-    "exchange_rate": {"provider": "ECB", "flow": "EXR", "pattern": "D.{pair}.EUR.SP00.A", "freq": "D", "label": "Exchange rate EUR/{pair}"},
+    # ==== ECONOMIC (Eurostat + ECB) ====
+    "gdp_real": {
+        "provider": "ECB",
+        "flow": "MNA",
+        "series": "Q.N.I8.W2.S1.S1.B.B1GQ._Z._Z._Z.EUR.LR.N",
+        "freq": "Q",
+        "label": "Real GDP (chain-linked)"
+    },
+    "inflation": {
+        "provider": "ECB",
+        "flow": "ICP",
+        "series": "M.U2.N.000000.4.ANR",
+        "freq": "M",
+        "label": "Inflation (HICP YoY)"
+    },
+    "unemployment": {
+        "provider": "Eurostat",
+        "dataset": "une_rt_m",
+        "params": {"sex": "T", "age": "Y25-74", "unit": "PC_ACT", "s_adj": "SA"},
+        "label": "Unemployment rate"
+    },
+    "employment": {
+        "provider": "Eurostat",
+        "dataset": "lfsi_emp_a",
+        "params": {"indic_em": "EMP_LFS", "sex": "T", "age": "Y20-64", "unit": "PC_POP"},
+        "label": "Employment rate"
+    },
+    "poverty_rate": {
+        "provider": "Eurostat",
+        "dataset": "ilc_li02",
+        "params": {"indic_il": "LI_R_MD60", "unit": "PC"},
+        "label": "Poverty rate (60% median income)"
+    },
+    "debt_gdp": {
+        "provider": "Eurostat",
+        "dataset": "gov_10q_ggdebt",
+        "params": {"sector": "S13", "unit": "PC_GDP", "na_item": "GD_NAC"},
+        "label": "Government debt (% GDP)"
+    },
+    "industrial_production": {
+        "provider": "Eurostat",
+        "dataset": "sts_inpr_m",
+        "params": {"indic_bt": "PRD", "nace_r2": "B-D", "s_adj": "SCA", "unit": "I15"},
+        "label": "Industrial production index"
+    },
+
+    # ==== FINANCIAL (ECB tested and stable) ====
+    "deposit_rate": {
+        "provider": "ECB",
+        "flow": "FM",
+        "series": "D.U2.EUR.4F.KR.DFR.LEV",
+        "freq": "D",
+        "label": "Deposit Facility Rate"
+    },
+    "refinancing_rate": {
+        "provider": "ECB",
+        "flow": "FM",
+        "series": "B.U2.EUR.4F.KR.MRR_FR.LEV",
+        "freq": "D",
+        "label": "Main Refinancing Operations – Fixed Rate Tenders"
+    },
+    "borrowing_households": {
+        "provider": "ECB",
+        "flow": "MIR",
+        "series": "M.U2.B.A2C.AM.R.A.2250.EUR.N",
+        "freq": "M",
+        "label": "Cost of borrowing for households (house purchase)"
+    },
+    "yield_curve_10y": {
+        "provider": "ECB",
+        "flow": "YC",
+        "series": "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y",
+        "freq": "D",
+        "label": "Yield curve 10-year AAA government bond"
+    },
+    "money_supply": {
+        "provider": "ECB",
+        "flow": "BSI",
+        "series": "M.U2.Y.V.M30.X.1.U2.2300.Z01.E",
+        "freq": "M",
+        "label": "Money supply (M3)"
+    },
+    "loans_households": {
+        "provider": "ECB",
+        "flow": "BSI",
+        "series": "M.U2.N.A.A20.A.1.U2.2240.Z01.E",
+        "freq": "M",
+        "label": "Loans to households"
+    },
+
+    # ==== MARKETS ====
+    "exchange_rate": {
+        "provider": "ECB",
+        "flow": "EXR",
+        "pattern": "D.{pair}.EUR.SP00.A",
+        "freq": "D",
+        "label": "Exchange rate EUR/{pair}"
+    },
+    "hours_worked": {
+        "provider": "ECB",
+        "flow": "ENA",
+        "series": "Q.Y.I8.W2.S1.S1._Z.EMP._Z._T._Z.HW._Z.N",
+        "freq": "Q",
+        "label": "Hours worked"
+    }
 }
+
 
 # -------------------------------------------------------------
 # 🗣️ Synonyms
 # -------------------------------------------------------------
 SYNONYMS = {
-    "gdp_real": ["gdp", "gross domestic product", "economic growth"],
-    "inflation": ["inflation", "hicp", "prices", "consumer prices"],
-    "unemployment": ["unemployment", "jobless"],
-    "employment": ["employment", "jobs", "workforce"],
-    "poverty_rate": ["poverty", "income inequality", "social exclusion"],
-    "debt_gdp": ["public debt", "government debt"],
-    "industrial_production": ["industrial production", "industry output"],
-    "deposit_rate": ["deposit rate", "ecb rate"],
-    "refinancing_rate": ["refinancing rate", "main refinancing", "mrr"],
-    "marginal_lending_rate": ["marginal lending rate", "mlr"],
-    "money_supply": ["money supply", "m3"],
-    "loans_households": ["loans to households", "mortgage"],
-    "loans_corporates": ["loans to corporates", "business credit"],
-    "exchange_rate": ["exchange rate", "eur to", "eur/", "eur ", "eurusd", "eur usd", "euro dollar", "euro pound", "euro yen", "currency", "forex", "fx"],
+    # ==== ECONOMIC ====
+    "gdp_real": [
+        "gdp", "gross domestic product", "economic growth"
+    ],
+    "inflation": [
+        "inflation", "hicp", "prices", "consumer prices", "price level"
+    ],
+    "unemployment": [
+        "unemployment", "jobless", "jobless rate"
+    ],
+    "employment": [
+        "employment", "jobs", "workforce", "employment rate"
+    ],
+    "poverty_rate": [
+        "poverty", "income inequality", "social exclusion", "at risk of poverty"
+    ],
+    "debt_gdp": [
+        "public debt", "government debt", "debt to gdp", "fiscal debt"
+    ],
+    "industrial_production": [
+        "industrial production", "industry output", "manufacturing index", "industrial index"
+    ],
+    "hours_worked": [
+        "hours worked", "working hours", "labour hours"
+    ],
+
+    # ==== FINANCIAL ====
+    "deposit_rate": [
+        "deposit rate", "ecb deposit", "deposit facility", "facility rate"
+    ],
+    "refinancing_rate": [
+        "refinancing rate", "main refinancing", "refi rate", "ecb tender", "mro", "refinancing operations"
+    ],
+    "borrowing_households": [
+        "cost of borrowing", "household borrowing", "mortgage rate", "home loan", "housing loan", "loan rate"
+    ],
+    "yield_curve_10y": [
+        "10-year yield", "bond yield", "government bond", "long-term rate", "sovereign yield", "yield curve"
+    ],
+    "money_supply": [
+        "money supply", "m3", "liquidity", "monetary aggregate"
+    ],
+    "loans_households": [
+        "loans to households", "household loans", "consumer credit", "personal loans", "mortgages"
+    ],
+
+    # ==== MARKETS ====
+    "exchange_rate": [
+        "exchange rate", "eur to", "eur/", "eur ", "eurusd", "eur usd",
+        "euro dollar", "euro pound", "euro yen", "currency", "forex", "fx", "eur gbp", "eur jpy"
+    ],
 }
+
 
 def match_indicator(text: str) -> list[str]:
     text = text.lower()
