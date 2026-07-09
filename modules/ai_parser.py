@@ -34,13 +34,22 @@ EUROSTAT_BASE = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/
 # 🌍 Country codes
 # -------------------------------------------------------------
 COUNTRY_CODES = {
+    # English
     "euro area": "EA", "eurozone": "EA", "european union": "EU27_2020",
     "italy": "IT", "france": "FR", "germany": "DE", "spain": "ES",
     "portugal": "PT", "belgium": "BE", "netherlands": "NL", "austria": "AT",
     "greece": "GR", "ireland": "IE", "finland": "FI", "luxembourg": "LU",
     "denmark": "DK", "sweden": "SE", "poland": "PL", "romania": "RO",
     "czech": "CZ", "czechia": "CZ", "hungary": "HU", "slovakia": "SK",
-    "slovenia": "SI", "croatia": "HR", "bulgaria": "BG"
+    "slovenia": "SI", "croatia": "HR", "bulgaria": "BG",
+    # Italian (user's language)
+    "area euro": "EA", "zona euro": "EA", "unione europea": "EU27_2020",
+    "italia": "IT", "francia": "FR", "germania": "DE", "spagna": "ES",
+    "portogallo": "PT", "belgio": "BE", "paesi bassi": "NL", "olanda": "NL",
+    "grecia": "GR", "irlanda": "IE", "finlandia": "FI", "lussemburgo": "LU",
+    "danimarca": "DK", "svezia": "SE", "polonia": "PL", "romania": "RO",
+    "ungheria": "HU", "slovacchia": "SK", "slovenia": "SI", "croazia": "HR",
+    "bulgaria": "BG",
 }
 
 def detect_countries(text: str) -> str:
@@ -49,6 +58,17 @@ def detect_countries(text: str) -> str:
         if name in text:
             return code
     return "EA"
+
+def _ecb_geo(country: str) -> str:
+    """ECB REF_AREA: euro area is 'U2'; countries use their ISO-2 code as-is."""
+    return "U2" if country == "EA" else country
+
+def detect_all_countries(text: str) -> list[str]:
+    """All countries named in the query, e.g. 'francia vs italia' -> ['FR','IT'].
+    Order-deduplicated; empty if none named."""
+    text = text.lower()
+    codes = [code for name, code in COUNTRY_CODES.items() if name in text]
+    return list(dict.fromkeys(codes))  # dedup, keep first occurrence
 
 # -------------------------------------------------------------
 # ⏱️ Period detection
@@ -89,6 +109,7 @@ INDICATOR_CATALOG = {
         "provider": "ECB",
         "flow": "ICP",
         "series": "M.U2.N.000000.4.ANR",
+        "geo_template": "M.{geo}.N.000000.4.ANR",  # {geo}=U2 (EA) or ISO-2 country
         "freq": "M",
         "label": "Inflation (HICP YoY)"
     },
@@ -113,8 +134,38 @@ INDICATOR_CATALOG = {
     "debt_gdp": {
     "provider": "Eurostat",
     "dataset": "gov_10q_ggdebt",
-    "params": {"sector":"S13","unit":"PC_GDP"},
+    "params": {"sector":"S13","na_item":"GD","unit":"PC_GDP"},
     "label": "Government debt (% GDP)"
+    },
+    "gov_deficit": {
+        "provider": "Eurostat",
+        "dataset": "gov_10dd_edpt1",
+        "params": {"sector": "S13", "na_item": "B9", "unit": "PC_GDP"},
+        "label": "Government deficit/surplus (% GDP)"
+    },
+    "gdp_growth": {
+        "provider": "Eurostat",
+        "dataset": "namq_10_gdp",
+        "params": {"unit": "CLV_PCH_PRE", "s_adj": "SCA", "na_item": "B1GQ"},
+        "label": "GDP growth (QoQ, %)"
+    },
+    "house_prices": {
+        "provider": "Eurostat",
+        "dataset": "prc_hpi_q",
+        "params": {"purchase": "TOTAL", "unit": "RCH_A"},
+        "label": "House price index (YoY, %)"
+    },
+    "labour_cost": {
+        "provider": "Eurostat",
+        "dataset": "lc_lci_r2_a",
+        "params": {"lcstruct": "D1_D4_MD5", "nace_r2": "B-S", "unit": "I20"},
+        "label": "Labour cost index (2020=100)"
+    },
+    "lt_yield": {
+        "provider": "Eurostat",
+        "dataset": "irt_lt_mcby_m",
+        "params": {"int_rt": "MCBY"},
+        "label": "Long-term government bond yield (Maastricht, %)"
     },
     "industrial_production": {
         "provider": "Eurostat",
@@ -189,70 +240,110 @@ INDICATOR_CATALOG = {
 # 🗣️ Synonyms
 # -------------------------------------------------------------
 SYNONYMS = {
-    # ==== ECONOMIC ====
-    "gdp_real": [
-        "real gdp", "volume gdp", "gdp constant prices", "economic growth"
-    ],
+    # ==== ECONOMIC ====  (English + Italian — user writes both)
     "gdp_per_capita": [
-        "gdp per capita", "income per person", "purchasing power", "pps gdp", "per capita gdp"
+        "gdp per capita", "income per person", "purchasing power", "pps gdp", "per capita gdp",
+        "pil pro capite", "reddito pro capite", "potere d'acquisto",
+    ],
+    "gdp_real": [
+        "gdp", "real gdp", "volume gdp", "gdp constant prices", "gross domestic product",
+        "pil", "prodotto interno lordo",
+    ],
+    "gdp_growth": [
+        "gdp growth", "economic growth", "growth rate", "gdp change",
+        "crescita del pil", "crescita economica", "crescita pil",
     ],
     "inflation": [
-        "inflation", "hicp", "prices", "consumer prices", "price level"
+        "inflation", "hicp", "prices", "consumer prices", "price level",
+        "inflazione", "prezzi al consumo", "prezzi", "ipca",
     ],
     "unemployment": [
-        "unemployment", "jobless", "jobless rate"
+        "unemployment", "jobless", "jobless rate",
+        "disoccupazione", "tasso di disoccupazione", "senza lavoro",
     ],
     "employment": [
-        "employment", "jobs", "workforce", "employment rate"
+        "employment", "jobs", "workforce", "employment rate",
+        "occupazione", "tasso di occupazione",
     ],
     "poverty_rate": [
-        "poverty", "income inequality", "social exclusion", "at risk of poverty"
+        "poverty", "income inequality", "social exclusion", "at risk of poverty",
+        "povertà", "rischio povertà", "esclusione sociale",
     ],
     "debt_gdp": [
-        "public debt", "government debt", "debt to gdp", "fiscal debt"
+        "public debt", "government debt", "debt to gdp", "fiscal debt",
+        "debito pubblico", "debito", "debito/pil", "debito su pil",
+    ],
+    "gov_deficit": [
+        "deficit", "budget deficit", "fiscal deficit", "government deficit", "public deficit", "surplus",
+        "deficit pubblico", "disavanzo", "deficit di bilancio", "saldo di bilancio",
+    ],
+    "house_prices": [
+        "house price", "house prices", "housing prices", "home prices", "property prices", "real estate prices",
+        "prezzi delle case", "prezzi immobili", "prezzi immobiliari", "mercato immobiliare",
+    ],
+    "labour_cost": [
+        "labour cost", "labor cost", "wages", "wage growth", "cost of labour", "compensation",
+        "costo del lavoro", "salari", "stipendi", "retribuzioni",
     ],
     "industrial_production": [
-        "industrial production", "industry output", "manufacturing index", "industrial index"
+        "industrial production", "industry output", "manufacturing index", "industrial index",
+        "produzione industriale", "indice industriale",
     ],
     "hours_worked": [
-        "hours worked", "working hours", "labour hours"
+        "hours worked", "working hours", "labour hours",
+        "ore lavorate", "ore di lavoro",
     ],
 
     # ==== FINANCIAL ====
     "deposit_rate": [
-        "deposit rate", "ecb deposit", "deposit facility", "facility rate"
+        "deposit rate", "ecb deposit", "deposit facility", "facility rate",
+        "tasso di deposito", "tasso sui depositi", "deposito bce",
     ],
     "refinancing_rate": [
-        "refinancing rate", "main refinancing", "refi rate", "ecb tender", "mro", "refinancing operations"
+        "refinancing rate", "main refinancing", "refi rate", "ecb tender", "mro", "refinancing operations",
+        "tasso di rifinanziamento", "rifinanziamento principale",
     ],
     "borrowing_households": [
-        "cost of borrowing", "household borrowing", "mortgage rate", "home loan", "housing loan", "loan rate"
+        "cost of borrowing", "household borrowing", "mortgage rate", "home loan", "housing loan", "loan rate",
+        "costo del credito", "mutuo", "tasso sui mutui", "prestito casa",
     ],
-    "yield_curve_10y": [
-        "10-year yield", "bond yield", "government bond", "long-term rate", "sovereign yield", "yield curve"
+    "yield_curve_10y": [  # ECB AAA euro-area benchmark curve (EA only)
+        "yield curve", "aaa yield", "aaa curve", "curva dei rendimenti", "curva aaa",
+    ],
+    "lt_yield": [  # Maastricht long-term yield, per country (Eurostat)
+        "10-year yield", "bond yield", "government bond", "sovereign yield", "long-term rate",
+        "10-year bond", "government bond yield", "maastricht",
+        "rendimento decennale", "rendimento titoli di stato", "titoli di stato", "btp", "tasso decennale",
     ],
     "money_supply": [
-        "money supply", "m3", "liquidity", "monetary aggregate"
+        "money supply", "m3", "liquidity", "monetary aggregate",
+        "offerta di moneta", "massa monetaria", "liquidità",
     ],
     "loans_households": [
-        "loans to households", "household loans", "consumer credit", "personal loans", "mortgages"
+        "loans to households", "household loans", "consumer credit", "personal loans", "mortgages",
+        "prestiti alle famiglie", "prestiti", "credito al consumo", "mutui",
     ],
 
     # ==== MARKETS ====
     "exchange_rate": [
         "exchange rate", "eur to", "eur/", "eur ", "eurusd", "eur usd",
-        "euro dollar", "euro pound", "euro yen", "currency", "forex", "fx", "eur gbp", "eur jpy"
+        "euro dollar", "euro pound", "euro yen", "currency", "forex", "fx", "eur gbp", "eur jpy",
+        "tasso di cambio", "cambio", "euro dollaro", "euro sterlina", "euro yen", "valuta",
     ],
 }
 
 
 def match_indicator(text: str) -> list[str]:
+    """Return matched indicator keys, longest (most specific) synonym first,
+    so 'pil pro capite' beats bare 'pil' and 'senza lavoro' beats 'lavoro'."""
     text = text.lower()
-    matches = []
+    hits = []  # (synonym_len, key)
     for key, synonyms in SYNONYMS.items():
-        if any(s in text for s in synonyms):
-            matches.append(key)
-    return matches
+        best = max((len(s) for s in synonyms if s in text), default=0)
+        if best:
+            hits.append((best, key))
+    hits.sort(reverse=True)
+    return [key for _, key in hits]
 
 # -------------------------------------------------------------
 # 🧠 LLM classifier (optional)
@@ -366,6 +457,7 @@ def interpret_query_with_ai(user_text: str):
     logger.info(f"🔮 Interpreting query: {user_text}")
     text = user_text.lower()
     country = detect_countries(text)
+    geos = detect_all_countries(text)   # [] if none named; may be 1 or many
     params = detect_period(text)
 
     # 0️⃣ Priority: FX pairs (EUR/USD, euro dollar, etc.)
@@ -392,6 +484,7 @@ def interpret_query_with_ai(user_text: str):
                 "freq": meta["freq"],
                 "indicator": meta["label"].format(pair=code),
                 "params": params,
+                "geos": ["EA"],  # FX is a currency pair, not a per-country series
             }
 
     # 1️⃣ Try match synonyms or LLM
@@ -401,18 +494,28 @@ def interpret_query_with_ai(user_text: str):
         if cat:
             matches = [cat]
     if not matches:
-        matches = ["inflation"]
+        # No indicator recognized → let the bot show a helpful hint instead of
+        # silently charting inflation.
+        return {"provider": "unknown", "query": user_text, "geos": geos}
 
     key = matches[0]
     meta = INDICATOR_CATALOG[key]
 
     if meta["provider"] == "ECB":
-        return {"provider": "ECB", "flow": meta["flow"], "series": meta["series"],
-                "freq": meta["freq"], "indicator": meta["label"], "params": params}
+        geo_template = meta.get("geo_template")
+        # Per-country only if the series supports it; else euro-area single line.
+        plan_geos = (geos or ["EA"]) if geo_template else ["EA"]
+        series = meta["series"]
+        if geo_template:
+            series = geo_template.format(geo=_ecb_geo(plan_geos[0]))
+        return {"provider": "ECB", "flow": meta["flow"], "series": series,
+                "geo_template": geo_template, "freq": meta["freq"],
+                "indicator": meta["label"], "params": params, "geos": plan_geos}
     elif meta["provider"] == "Eurostat":
+        plan_geos = geos or ["EA"]
         return {"provider": "Eurostat", "dataset": meta["dataset"],
-                "params": {**meta["params"], "geo": country},
-                "indicator": meta["label"]}
+                "eu_params": meta["params"], "params": params,
+                "indicator": meta["label"], "geos": plan_geos}
 
     logger.warning("⚠️ Defaulting to Euro area inflation.")
     return {"provider": "ECB", "flow": "ICP",

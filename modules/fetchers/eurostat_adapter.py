@@ -12,20 +12,27 @@ EUROSTAT_BASE = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/
 _EA_ALIASES = ["EA20", "EA19", "EA", "U2"]
 
 def _expand_eurostat_json(j):
-    """Espande SDMX-JSON Eurostat in tidy records."""
-    if "value" not in j: 
+    """Decode Eurostat JSON-stat 2.0 into tidy records.
+
+    JSON-stat stores observations in a sparse dict keyed by the ROW-MAJOR flat
+    index over the dimensions listed in j['id'] with cardinalities j['size'].
+    The old version faked this with itertools.product over dict-key order, which
+    misaligns time↔value on multi-dimension datasets (GDP, house prices, …).
+    """
+    if not j.get("value"):
         return pd.DataFrame()
     dims = j["dimension"]
-    dim_order = [d for d in dims.keys() if d not in ("id","size")]
-    labels = {d: dims[d]["category"]["label"] for d in dim_order}
-    keys = [list(dims[d]["category"]["index"].keys()) for d in dim_order]
-    combos = list(itertools.product(*keys))
-    vals = list(j["value"].values()) if isinstance(j["value"], dict) else j["value"]
+    ids = j.get("id") or [d for d in dims if d not in ("id", "size")]
+    sizes = j.get("size") or [len(dims[d]["category"]["index"]) for d in ids]
+    idx2code = {d: {v: k for k, v in dims[d]["category"]["index"].items()} for d in ids}
+    strides = [1] * len(sizes)
+    for i in range(len(sizes) - 2, -1, -1):
+        strides[i] = strides[i + 1] * sizes[i + 1]
     out = []
-    for i, combo in enumerate(combos):
-        if i >= len(vals): break
-        rec = {dim: labels[dim][combo[k]] for k, dim in enumerate(dim_order)}
-        rec["OBS_VALUE"] = vals[i]
+    for flat_str, val in j["value"].items():
+        flat = int(flat_str)
+        rec = {d: idx2code[d][(flat // strides[k]) % sizes[k]] for k, d in enumerate(ids)}
+        rec["OBS_VALUE"] = val
         out.append(rec)
     return pd.DataFrame(out)
 

@@ -1,4 +1,13 @@
 import logging
+import sys
+
+# Windows consoles default to cp1252, which crashes on emoji in print/log.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from modules.telegram_bot import start_bot
 
 if __name__ == "__main__":

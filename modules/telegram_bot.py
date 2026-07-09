@@ -9,16 +9,19 @@
 # ==============================================================
 import asyncio
 import logging
+import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from config.settings import TELEGRAM_TOKEN
+import pandas as pd
 from modules.llm_router import parse_message_to_query
-from modules.ai_parser import interpret_query_with_ai
+from modules.ai_parser import interpret_query_with_ai, _ecb_geo
 from modules.fetchers.ebc_adapter import fetch_ecb_data
-from modules.plotter import plot_timeseries, plot_map
+from modules.plotter import plot_timeseries
 from modules.data_commenter import summarize_trend
 from modules.fetchers.eurostat_adapter import fetch_eurostat_data
+from modules.interaction_log import log_interaction
 
 
 # --------------------------------------------------------------
@@ -27,59 +30,69 @@ from modules.fetchers.eurostat_adapter import fetch_eurostat_data
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
-LAST_DATASETS = {}
 
 # --------------------------------------------------------------
-# Main Menus
+# Menus — data-driven: 6 sections, each a submenu of indicators.
+# Each leaf is (button label, query text). The query text is routed through the
+# exact same NL pipeline as a typed message, so menu == typing.
 # --------------------------------------------------------------
+MENUS = {
+    "growth": ("📊 Growth & Output", [
+        ("📈 Real GDP", "GDP Euro area since 2015"),
+        ("💵 GDP per capita (PPS)", "GDP per capita Euro area"),
+        ("🚀 GDP growth (QoQ)", "GDP growth Euro area since 2019"),
+        ("🏭 Industrial production", "Industrial production Euro area since 2018"),
+        ("⏱ Hours worked", "Hours worked Euro area"),
+    ]),
+    "prices": ("💶 Prices & Cost of Living", [
+        ("📉 Inflation (HICP YoY)", "Inflation Euro area since 2020"),
+        ("🏠 House prices (YoY)", "House prices Euro area since 2018"),
+        ("💼 Labour cost index", "Labour cost Euro area since 2018"),
+    ]),
+    "labour": ("👥 Labour Market", [
+        # une_rt_m has no euro-area aggregate → default to a country compare.
+        ("👷 Unemployment (IT vs FR)", "Unemployment Italy vs France since 2018"),
+        ("🧑‍💼 Employment rate", "Employment Euro area since 2015"),
+        ("🤝 Poverty / social exclusion", "Poverty rate Italy vs Spain"),
+    ]),
+    "public": ("🏛 Public Finance", [
+        ("💸 Government debt (% GDP)", "Public debt Euro area since 2015"),
+        ("📊 Deficit / surplus (% GDP)", "Government deficit Euro area since 2015"),
+    ]),
+    "money": ("💰 Money & Rates", [
+        ("🏦 Deposit facility rate", "ECB deposit rate"),
+        ("🏛 Main refinancing rate", "Main refinancing operations ECB"),
+        ("🏠 Cost of borrowing (households)", "Cost of borrowing euro area"),
+        ("📈 Yield curve 10Y (AAA)", "Yield curve euro area"),
+        ("🌍 10Y bond yield (per country)", "Bond yield Italy"),
+        ("💵 Money supply (M3)", "Money supply euro area"),
+        ("💳 Loans to households", "Loans to households euro area"),
+    ]),
+    "fx": ("💱 Exchange Rates", [
+        ("🇪🇺🇺🇸 EUR/USD", "Exchange rate euro dollar"),
+        ("🇪🇺🇬🇧 EUR/GBP", "Exchange rate euro pound"),
+        ("🇪🇺🇯🇵 EUR/JPY", "Exchange rate euro yen"),
+        ("🇪🇺🇨🇭 EUR/CHF", "Exchange rate euro franc"),
+        ("🇪🇺🇵🇱 EUR/PLN", "Exchange rate euro zloty"),
+        ("🇪🇺🇹🇷 EUR/TRY", "Exchange rate euro lira"),
+    ]),
+}
+
+# Query text is sent in callback_data (Telegram limit: 64 bytes). Guard it.
+assert all(len(f"q:{q}".encode()) <= 64 for _, leaves in MENUS.values() for _, q in leaves), \
+    "a menu query exceeds Telegram's 64-byte callback_data limit"
+
+
 def menu_root() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Economic Indicators", callback_data="menu:econ")],
-            [InlineKeyboardButton(text="💰 Monetary & Financial", callback_data="menu:fin")],
-            [InlineKeyboardButton(text="💱 Exchange Rates", callback_data="menu:fx")],
-        ]
-    )
-
-def menu_econ() -> InlineKeyboardMarkup:
-    pairs = [
-        ("📈 Real GDP — Euro Area", "ex: GDP Euro area since 2015"),
-        ("💵 GDP per capita (PPS) — Euro Area", "ex: GDP per capita Euro area since 2015"),
-        ("📉 Inflation (HICP YoY) — Euro Area", "ex: Inflation Euro area since 2020"),
-        ("👥 Unemployment Rate — Euro Area", "ex: Unemployment Euro area since 2018"),
-        ("👔 Employment Rate — Euro Area", "ex: Employment rate Euro area since 2018"),
-        ("💸 Public Debt (% GDP) — Euro Area", "ex: Public debt Euro area since 2015"),
-        ("🏭 Industrial Production — Euro Area", "ex: Industrial production Euro area since 2018"),
-        ("🚧 Poverty Rate (Eurostat) — Euro Area", "ex: Poverty rate Euro area"),
-    ]
-    rows = [[InlineKeyboardButton(text=lbl, callback_data=qd)] for lbl, qd in pairs]
-    rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:root")])
+    rows = [[InlineKeyboardButton(text=title, callback_data=f"cat:{key}")]
+            for key, (title, _) in MENUS.items()]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def menu_fin() -> InlineKeyboardMarkup:
-    pairs = [
-        ("🏦 Deposit Facility Rate (DFR)", "ex: ECB deposit rate"),
-        ("🏛 Main Refinancing Operations – Fixed Rate", "ex: Main refinancing operations ECB"),
-        ("🏠 Cost of Borrowing for Households (House Purchase)", "ex: Cost of borrowing euro area"),
-        ("📈 Yield Curve – 10Y AAA Government Bond", "ex: 10-year bond yield euro area"),
-        ("💵 Money Supply (M3)", "ex: Money supply euro area"),
-        ("💳 Loans to Households", "ex: Loans to households euro area"),
-    ]
-    rows = [[InlineKeyboardButton(text=lbl, callback_data=qd)] for lbl, qd in pairs]
-    rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:root")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def menu_fx() -> InlineKeyboardMarkup:
-    pairs = [
-        ("🇪🇺🇺🇸 EUR/USD", "ex: Exchange rate euro dollar"),
-        ("🇪🇺🇬🇧 EUR/GBP", "ex: Exchange rate euro pound"),
-        ("🇪🇺🇯🇵 EUR/JPY", "ex: Exchange rate euro yen"),
-        ("🇪🇺🇨🇭 EUR/CHF", "ex: Exchange rate euro franc"),
-        ("🇪🇺🇵🇱 EUR/PLN", "ex: Exchange rate euro zloty"),
-        ("🇪🇺🇹🇷 EUR/TRY", "ex: Exchange rate euro lira"),
-    ]
-    rows = [[InlineKeyboardButton(text=lbl, callback_data=qd)] for lbl, qd in pairs]
-    rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:root")])
+def menu_section(key: str) -> InlineKeyboardMarkup:
+    _, leaves = MENUS[key]
+    rows = [[InlineKeyboardButton(text=lbl, callback_data=f"q:{q}")] for lbl, q in leaves]
+    rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="cat:root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -98,13 +111,15 @@ async def cmd_start(message: types.Message):
         "👋 *Welcome to EU Analytics Bot!*\n\n"
         "Developed by *Giulio Albano* — University of Bari (UNIBA).\n"
         "PhD in Economics and Finance of Public Administrations.\n\n"
-        "📊 Connects to the *ECB Data Portal* (and soon *Eurostat*).\n\n"
-        "Examples:\n"
-        "• `Euro area GDP since 2015`\n"
-        "• `Inflation in the Euro area`\n"
-        "• `EUR/USD exchange rate`\n"
-        "• `Loans to households`\n\n"
-        "Or use the menu below ⬇️",
+        "📊 Live data from the *ECB Data Portal* and *Eurostat*.\n"
+        "Just type naturally — English or Italian.\n\n"
+        "Try:\n"
+        "• `Inflation Italy vs Germany since 2020`  ← compare!\n"
+        "• `Disoccupazione Francia Spagna`\n"
+        "• `House prices Euro area`\n"
+        "• `Rendimento decennale Italia`\n"
+        "• `EUR/USD exchange rate`\n\n"
+        "Or tap 🚀 *Start* for the full menu ⬇️",
         parse_mode="Markdown",
         reply_markup=kb,
     )
@@ -131,7 +146,7 @@ async def info_message(message: types.Message):
         "_PhD in Economics and Finance of Public Administrations_\n\n"
         "📚 Data sources:\n"
         "• European Central Bank (ECB) Data Portal — CC BY 4.0\n"
-        "• Eurostat (coming soon)\n"
+        "• Eurostat — CC BY 4.0\n"
         "🔗 https://data.ecb.europa.eu\n"
         "🔗 https://ec.europa.eu/eurostat",
         parse_mode="Markdown",
@@ -145,24 +160,15 @@ async def start_menu(message: types.Message):
 # --------------------------------------------------------------
 # CALLBACKS menu
 # --------------------------------------------------------------
-@dp.callback_query(F.data == "menu:root")
-async def cb_root(callback: types.CallbackQuery):
-    await callback.message.edit_text("Scegli una categoria:", reply_markup=menu_root())
-    await callback.answer()
-
-@dp.callback_query(F.data == "menu:econ")
-async def cb_econ(callback: types.CallbackQuery):
-    await callback.message.edit_text("📊 *Indicatori Economici*", parse_mode="Markdown", reply_markup=menu_econ())
-    await callback.answer()
-
-@dp.callback_query(F.data == "menu:fin")
-async def cb_fin(callback: types.CallbackQuery):
-    await callback.message.edit_text("💰 *Indicatori Monetari & Finanziari*", parse_mode="Markdown", reply_markup=menu_fin())
-    await callback.answer()
-
-@dp.callback_query(F.data == "menu:fx")
-async def cb_fx(callback: types.CallbackQuery):
-    await callback.message.edit_text("💱 *Tassi di Cambio*", parse_mode="Markdown", reply_markup=menu_fx())
+@dp.callback_query(F.data.startswith("cat:"))
+async def cb_category(callback: types.CallbackQuery):
+    key = callback.data.split("cat:")[1]
+    if key == "root":
+        await callback.message.edit_text("Choose a category:", reply_markup=menu_root())
+    else:
+        title, _ = MENUS[key]
+        await callback.message.edit_text(f"*{title}*\nPick an indicator, or type e.g. `… Italy vs France`",
+                                         parse_mode="Markdown", reply_markup=menu_section(key))
     await callback.answer()
 
 # --------------------------------------------------------------
@@ -170,129 +176,134 @@ async def cb_fx(callback: types.CallbackQuery):
 # --------------------------------------------------------------
 async def process_text_query(message: types.Message, text: str):
     """Interpreta la query, scarica i dati, disegna grafico e commenta."""
-    if text.strip() in {"🚀 Avvia", "ℹ️ Info"}:
+    if text.strip() in {"🚀 Start", "ℹ️ Info"}:
         return
-    logging.info(f"🧠 Elaborazione: {text}")
+    logging.info(f"🧠 Query: {text}")
     plan = parse_message_to_query(text)
     if isinstance(plan, list):
-        await message.answer(f"📊 Ho trovato {len(plan)} indicatori. Elaboro i grafici…")
+        await message.answer(f"📊 Found {len(plan)} indicators — drawing charts…")
         for p in plan:
-            await _handle_single_query(message, p)
+            await _handle_single_query(message, p, user_text=text)
         return
-    await _handle_single_query(message, plan)
+    await _handle_single_query(message, plan, user_text=text)
 
-async def _handle_single_query(message: types.Message, query: dict):
-    indicator = query.get("indicator", "Indicatore")
+def _fetch_one(query: dict, geo: str) -> pd.DataFrame:
+    if query.get("provider", "ECB") == "ECB":
+        tmpl = query.get("geo_template")
+        series = tmpl.format(geo=_ecb_geo(geo)) if tmpl else query.get("series")
+        return fetch_ecb_data(query.get("flow"), series, query.get("params", {}))
+    return fetch_eurostat_data(query.get("dataset"), {**query.get("eu_params", {}), "geo": geo})
+
+
+def _fetch_frame(query: dict) -> pd.DataFrame:
+    """Fetch a normalized [TIME_PERIOD, OBS_VALUE, COUNTRY] frame across every
+    requested geo, so a 2-country query becomes a 2-line chart. One provider,
+    one indicator, N countries."""
+    geos = query.get("geos") or ["EA"]
+    start = query.get("params", {}).get("startPeriod")
+    frames = []
+    for geo in geos:
+        d = _fetch_one(query, geo)
+        for delay in (0.6, 1.5):  # backoff retries — Eurostat drops requests under rapid fire
+            if d is not None and not d.empty:
+                break
+            time.sleep(delay)
+            d = _fetch_one(query, geo)
+        if d is None or d.empty:
+            continue
+        d = d.loc[:, ["TIME_PERIOD", "OBS_VALUE"]].copy()
+        d["COUNTRY"] = geo
+        frames.append(d)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    if start:  # apply the requested window — but not if it would empty a stale
+        windowed = df[df["TIME_PERIOD"] >= pd.to_datetime(start)]  # dataset (e.g. poverty ends 2020)
+        if not windowed.empty:
+            df = windowed
+    return df
+
+
+def _help_text() -> str:
+    return (
+        "🤔 I couldn't map that to a dataset. Try, for example:\n\n"
+        "• `Inflation Italy since 2020`\n"
+        "• `Unemployment France vs Italy`\n"
+        "• `GDP per capita Euro area`\n"
+        "• `ECB deposit rate`\n"
+        "• `EUR/USD exchange rate`\n\n"
+        "Or tap 🚀 *Start* for the full menu."
+    )
+
+
+async def _handle_single_query(message: types.Message, query: dict, user_text: str = ""):
+    user_id = message.from_user.id if message.from_user else ""
+    indicator = query.get("indicator", "Indicator")
     provider  = query.get("provider", "ECB")
-    flow      = query.get("flow")
-    series    = query.get("series")
-    params    = query.get("params", {"lastNObservations": 24})
 
-    # Caso “POVERTY_RATE_EUROSTAT” non serve più: ora lo prendiamo davvero
-    # Pulizia “ex: …”
-    if isinstance(series, str) and series.startswith("ex: "):
-        text_query = series.replace("ex: ", "").strip()
-        return await process_text_query(message, text_query)
+    # Unrecognized query → friendly guidance instead of a wrong chart
+    if provider == "unknown":
+        await message.answer(_help_text(), parse_mode="Markdown")
+        log_interaction(user_id=user_id, query=user_text, provider="unknown",
+                        indicator="", n_obs=0, status="unknown")
+        return
 
-    await message.answer(f"📡 Fetch *{indicator}* from {provider}…", parse_mode="Markdown")
+    geos = query.get("geos") or ["EA"]
+    title = indicator if not (len(geos) == 1 and geos[0] != "EA") else f"{indicator} — {geos[0]}"
+
+    await message.answer(f"📡 Fetching *{title}*…", parse_mode="Markdown")
     try:
-        if provider == "ECB":
-            df = fetch_ecb_data(flow, series, params)  # la tua funzione esistente
-        else:
-            # Eurostat
-            dataset = query.get("dataset")
-            eparams = query.get("params", {})
-            df = fetch_eurostat_data(dataset, eparams)
-
+        df = _fetch_frame(query)
         if df is None or df.empty:
-            await message.answer("⚠️ Nessun dato restituito.", parse_mode="Markdown")
+            await message.answer(
+                f"⚠️ No data for *{title}*. This series may not exist for "
+                f"{', '.join(geos)} — try the Euro area or another indicator.",
+                parse_mode="Markdown")
+            log_interaction(user_id=user_id, query=user_text, provider=provider,
+                            indicator=title, n_obs=0, status="empty")
             return
 
-        # Uniformiamo colonne per il plotter esistente:
-        # - se il df arriva già con TIME_PERIOD/OBS_VALUE/COUNTRY non facciamo nulla
-        # - se arriva come tua pipeline ECB, fai mapping qui sotto se serve
-        country_col = "COUNTRY" if "COUNTRY" in df.columns else "COUNTRY"
-        time_col    = "TIME_PERIOD" if "TIME_PERIOD" in df.columns else "TIME_PERIOD"
-        value_col   = "OBS_VALUE" if "OBS_VALUE" in df.columns else "OBS_VALUE"
-
-        multi_country = country_col in df.columns and df[country_col].nunique() > 1
-        single_time   = df[time_col].nunique() == 1
-
-        if multi_country and single_time:
-            buf = plot_map(df, indicator)
+        if df["COUNTRY"].nunique() > 1:  # compare → one line per country
+            pivot = df.pivot_table(index="TIME_PERIOD", columns="COUNTRY", values="OBS_VALUE").sort_index()
+            buf = plot_timeseries(pivot, title=title)
         else:
-            if multi_country:
-                pivot = df.pivot_table(index=time_col, columns=country_col, values=value_col).sort_index()
-                buf = plot_timeseries(pivot, title=indicator)
-                df = pivot.reset_index().melt(id_vars=time_col, var_name=country_col, value_name=value_col)
-            else:
-                # Se il tuo plotter accetta anche serie “time/value” rinomina:
-                ts = df.rename(columns={time_col:"TIME_PERIOD", value_col:"OBS_VALUE"})
-                buf = plot_timeseries(ts, title=indicator)
+            buf = plot_timeseries(df[["TIME_PERIOD", "OBS_VALUE"]], title=title)
 
-        keyboard = None
-        if not (multi_country and single_time) and multi_country:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🌍 Show map", callback_data=f"show_map:{indicator}")]]
-            )
-            LAST_DATASETS[indicator] = df
-
+        src = "ECB Data Portal" if provider == "ECB" else "Eurostat"
         photo = BufferedInputFile(buf.getvalue(), filename="chart.png")
         await message.answer_photo(
             photo=photo,
-            caption=f"{indicator}\n_Fonte: {'ECB Data Portal' if provider=='ECB' else 'Eurostat'} (CC BY 4.0)_",
+            caption=f"*{title}*\n_Source: {src} (CC BY 4.0)_",
             parse_mode="Markdown",
-            reply_markup=keyboard
         )
 
-        summary = summarize_trend(df, indicator_name=indicator)
+        summary = summarize_trend(df, indicator_name=title, provider=provider)
         if summary:
             await message.answer(summary, parse_mode="Markdown")
 
+        log_interaction(user_id=user_id, query=user_text, provider=provider,
+                        indicator=title, n_obs=len(df), status="ok")
+
     except Exception as e:
-        logging.exception("❌ Errore nel recupero dati:")
-        await message.answer(f"❌ Errore durante il recupero dei dati:\n`{e}`", parse_mode="Markdown")
+        logging.exception("❌ data error:")
+        await message.answer(f"❌ Error fetching data:\n`{e}`", parse_mode="Markdown")
+        log_interaction(user_id=user_id, query=user_text, provider=provider,
+                        indicator=title, n_obs="", status="error", error=str(e))
 
 # --------------------------------------------------------------
-# CALLBACKS secondarie
+# CALLBACK: a menu leaf → run its query through the NL pipeline
 # --------------------------------------------------------------
-@dp.callback_query(F.data.startswith("show_map:"))
-async def cb_show_map(callback: types.CallbackQuery):
-    indicator = callback.data.split("show_map:")[1]
-    if indicator not in LAST_DATASETS:
-        await callback.answer("⚠️ Dataset non disponibile, riprova.")
-        return
-    df = LAST_DATASETS[indicator]
-    try:
-        buf = plot_map(df, indicator)
-        photo = BufferedInputFile(buf.getvalue(), filename="map.png")
-        await callback.message.answer_photo(
-            photo=photo,
-            caption=f"🌍 {indicator} — ultimi dati per paese\n_Fonte: ECB Data Portal (CC BY 4.0)_",
-            parse_mode="Markdown",
-        )
-        await callback.answer("✅ Mappa generata.")
-    except Exception as e:
-        logging.exception("Errore nella callback della mappa:")
-        await callback.answer(f"❌ Errore: {e}")
-
-@dp.callback_query()
-async def cb_examples(callback: types.CallbackQuery):
-    data = callback.data
-    if data.startswith("menu:"):
-        return
-    if data.startswith("ex: "):
-        await callback.answer()
-        query_text = data.replace("ex: ", "").strip()
-        await callback.message.answer(f"🧠 Hai selezionato: _{query_text}_", parse_mode="Markdown")
-        await process_text_query(callback.message, query_text)
-        return
+@dp.callback_query(F.data.startswith("q:"))
+async def cb_run_query(callback: types.CallbackQuery):
     await callback.answer()
+    query_text = callback.data[2:].strip()
+    await callback.message.answer(f"🧠 _{query_text}_", parse_mode="Markdown")
+    await process_text_query(callback.message, query_text)
 
 # --------------------------------------------------------------
-# Gestione messaggi liberi (esclude comandi e bottoni)
+# Free text (excludes commands and the reply-keyboard buttons)
 # --------------------------------------------------------------
-@dp.message(~CommandStart(), ~Command("help"), ~F.text.in_({"ℹ️ Info", "🚀 Avvia"}))
+@dp.message(~CommandStart(), ~Command("help"), ~F.text.in_({"ℹ️ Info", "🚀 Start"}))
 async def any_text(message: types.Message):
     await process_text_query(message, message.text.strip())
 

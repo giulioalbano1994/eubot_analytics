@@ -8,12 +8,16 @@ Covers Macro, Monetary, and FX categories with metadata support.
 =====================================================================
 """
 
+import io
+import time
 import pandas as pd
 import requests
 import logging
 from ecbdata import ecbdata
 from datetime import datetime
 from pathlib import Path
+
+CACHE_TTL = 24 * 3600  # seconds: refetch daily so published revisions land
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -44,8 +48,12 @@ def fetch_ecb_data(flow: str, key: str, params: dict | None = None, cache: bool 
     end = params.get("endPeriod") if params else None
     last = params.get("lastNObservations") if params else None
 
-    cache_file = CACHE_DIR / f"{full_series.replace('.', '_')}.csv"
-    if cache and cache_file.exists():
+    # Cache key MUST include the period params, else a full-history pull masks
+    # every later windowed request for the same series.
+    tag = "_".join(x for x in (start, end, str(last) if last else "") if x).replace(":", "")
+    stem = full_series.replace(".", "_") + (f"__{tag}" if tag else "")
+    cache_file = CACHE_DIR / f"{stem}.csv"
+    if cache and cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < CACHE_TTL:
         try:
             df = pd.read_csv(cache_file, parse_dates=["TIME_PERIOD"])
             logger.info(f"📂 Loaded from cache: {cache_file.name} ({len(df)} rows)")
@@ -90,7 +98,7 @@ def _fetch_ecb_csv(flow: str, key: str, params: dict | None = None) -> pd.DataFr
     try:
         r = requests.get(url, params=qs, timeout=60)
         r.raise_for_status()
-        df = pd.read_csv(pd.compat.StringIO(r.text))
+        df = pd.read_csv(io.StringIO(r.text))
         logger.info(f"📥 REST CSV retrieved successfully for {flow}/{key}")
         return df
     except requests.exceptions.HTTPError as e:
@@ -118,7 +126,10 @@ def _normalize_ecb_df(df: pd.DataFrame, key: str, flow: str) -> pd.DataFrame:
     df = df.rename(columns={time_col: "TIME_PERIOD", val_col: "OBS_VALUE"})
     df["FLOW"] = flow
     df["COUNTRY"] = _infer_country(df, key)
-    df["TIME_PERIOD"] = pd.to_datetime(df["TIME_PERIOD"], errors="coerce")
+    # astype(str) first: annual ECB series return TIME_PERIOD as int year (2021),
+    # which to_datetime would misread as nanoseconds → 1970. As strings, "2021",
+    # "2021-Q1", "2021-01", "2021-01-01" all parse correctly.
+    df["TIME_PERIOD"] = pd.to_datetime(df["TIME_PERIOD"].astype(str), errors="coerce")
     df["OBS_VALUE"] = pd.to_numeric(df["OBS_VALUE"], errors="coerce")
     df = df.dropna(subset=["TIME_PERIOD", "OBS_VALUE"]).sort_values("TIME_PERIOD")
 

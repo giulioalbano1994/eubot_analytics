@@ -8,9 +8,12 @@
 # ==============================================================
 
 import os
+import logging
 import pandas as pd
 from datetime import datetime
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------
 # 1️⃣ Setup
@@ -22,26 +25,44 @@ ECB_CITATION = (
     "_Data source: European Central Bank Data Portal — "
     "https://data.ecb.europa.eu/ — licensed under CC BY 4.0._"
 )
+EUROSTAT_CITATION = (
+    "_Data source: Eurostat — https://ec.europa.eu/eurostat — "
+    "licensed under CC BY 4.0._"
+)
+
+def _citation(provider: str) -> str:
+    return EUROSTAT_CITATION if provider == "Eurostat" else ECB_CITATION
 
 # --------------------------------------------------------------
 # 2️⃣ Utility: compute simple stats
 # --------------------------------------------------------------
 def _compute_trend_stats(df: pd.DataFrame, country_col="COUNTRY"):
-    """Compute latest value, change, and % change for each country."""
+    """Rich per-country stats over the whole window: latest, change since start,
+    latest step, min/max (with dates), and mean."""
     stats = {}
     for c in df[country_col].unique():
         sub = df[df[country_col] == c].dropna(subset=["OBS_VALUE"]).sort_values("TIME_PERIOD")
         if len(sub) < 2:
             continue
-        last, prev = sub["OBS_VALUE"].iloc[-1], sub["OBS_VALUE"].iloc[-2]
-        change = last - prev
-        pct_change = (change / prev * 100) if prev else 0
+        v = sub["OBS_VALUE"].astype(float)
+        t = sub["TIME_PERIOD"]
+        first, last, prev = v.iloc[0], v.iloc[-1], v.iloc[-2]
+        imax, imin = v.idxmax(), v.idxmin()
+        step = last - prev
         stats[c] = {
-            "last": round(float(last), 2),
-            "prev": round(float(prev), 2),
-            "abs_change": round(float(change), 2),
-            "pct_change": round(float(pct_change), 2),
-            "arrow": "↑" if change > 0 else "↓" if change < 0 else "→",
+            "first": round(first, 2),
+            "last": round(last, 2),
+            "abs_change": round(step, 2),                       # latest step
+            "pct_change": round((step / prev * 100) if prev else 0, 2),
+            "window_change": round(last - first, 2),            # start → now
+            "window_pct": round((last - first) / first * 100 if first else 0, 2),
+            "min": round(v.min(), 2), "min_date": t[imin].strftime("%Y-%m"),
+            "max": round(v.max(), 2), "max_date": t[imax].strftime("%Y-%m"),
+            "mean": round(v.mean(), 2),
+            "start_date": t.iloc[0].strftime("%Y-%m"),
+            "end_date": t.iloc[-1].strftime("%Y-%m"),
+            "n": len(sub),
+            "arrow": "↑" if step > 0 else "↓" if step < 0 else "→",
         }
     return stats
 
@@ -50,18 +71,26 @@ def _compute_trend_stats(df: pd.DataFrame, country_col="COUNTRY"):
 # --------------------------------------------------------------
 def _build_prompt(stats: dict, indicator: str, lang: str = "en") -> str:
     now = datetime.now().strftime("%B %Y")
+    multi = len(stats) > 1
     header = (
-        f"You are a professional economic analyst for a Telegram bot. "
-        f"Summarize the following indicator: '{indicator}'. "
-        f"The current month is {now}. Write in {lang}. "
-        f"Focus on trends, differences, and anomalies."
+        f"You are a sharp macroeconomic analyst writing for a Telegram audience — "
+        f"smart but not academic. Indicator: '{indicator}'. Today: {now}. "
+        f"Write in {lang.upper()}. Ground every claim in the numbers below; never invent figures."
     )
-    details = ["Latest available data by country:"]
+    details = ["Data by country (over the charted window):"]
     for c, s in stats.items():
-        details.append(f"- {c}: {s['last']:.2f} ({s['arrow']} {s['abs_change']:+.2f}, {s['pct_change']:+.1f}%)")
+        details.append(
+            f"- {c}: latest {s['last']} ({s['end_date']}); started {s['first']} ({s['start_date']}); "
+            f"window change {s['window_change']:+} ({s['window_pct']:+.1f}%); "
+            f"min {s['min']} ({s['min_date']}), max {s['max']} ({s['max_date']}), avg {s['mean']}; "
+            f"latest step {s['abs_change']:+} ({s['pct_change']:+.1f}%)."
+        )
     guidelines = (
-        "Now write exactly 3 short bullet points (≤20 words each). "
-        "Be factual and clear, no speculation. Mention changes or comparisons if visible."
+        "Write:\n"
+        "1) A bold one-line headline with ONE relevant emoji capturing the main story.\n"
+        f"2) {'3 insights comparing the countries — who is higher/lower, diverging or converging, gap size.' if multi else '3 insights — direction over the window, the peak/trough and when, and the latest move.'}\n"
+        "3) A final one-line 'Bottom line:' takeaway.\n"
+        "Each line ≤22 words, punchy, concrete, no filler, no disclaimers. Use • for the 3 insights."
     )
     return "\n".join([header, "", *details, "", guidelines])
 
@@ -77,14 +106,16 @@ def _detect_language(indicator: str) -> str:
 # --------------------------------------------------------------
 # 5️⃣ Main summarizer
 # --------------------------------------------------------------
-def summarize_trend(df: pd.DataFrame, indicator_name="Indicator", country_col="COUNTRY") -> str:
-    """Generate a short smart summary with 3 bullet points and ECB citation."""
+def summarize_trend(df: pd.DataFrame, indicator_name="Indicator", country_col="COUNTRY",
+                    provider="ECB") -> str:
+    """Generate a short smart summary with headline + insights and a source citation."""
+    citation = _citation(provider)
     if df.empty or country_col not in df.columns:
-        return f"⚠️ No data available.\n\n{ECB_CITATION}"
+        return f"⚠️ No data available.\n\n{citation}"
 
     stats = _compute_trend_stats(df, country_col)
     if not stats:
-        return f"⚠️ Not enough data to summarize.\n\n{ECB_CITATION}"
+        return f"⚠️ Not enough data to summarize.\n\n{citation}"
 
     lang = _detect_language(indicator_name)
 
@@ -98,22 +129,36 @@ def summarize_trend(df: pd.DataFrame, indicator_name="Indicator", country_col="C
                     {"role": "system", "content": "You are an expert macroeconomic data analyst."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.4,
-                max_tokens=200,
+                temperature=0.5,
+                max_tokens=260,
             )
             text = response.choices[0].message.content.strip()
-            return f"📊 *Quick Summary*\n{text}\n\n{ECB_CITATION}"
+            return f"{text}\n\n{citation}"
         except Exception as e:
-            print(f"⚠️ GPT summarization failed: {e}")
+            logger.warning(f"GPT summarization failed: {e}")
 
-    # --- Fallback (manual summary) ---
-    lines = ["📊 *Quick Summary*"]
+    # --- Fallback (deterministic, but with a story) ---
+    def _emoji(x):
+        return "⬆️" if x > 0 else "⬇️" if x < 0 else "➡️"
+
+    lines = []
+    if len(stats) > 1:  # comparison
+        hi = max(stats.items(), key=lambda kv: kv[1]["last"])
+        lo = min(stats.items(), key=lambda kv: kv[1]["last"])
+        gap = hi[1]["last"] - lo[1]["last"]
+        lines.append(f"📊 *{indicator_name}*")
+        lines.append(f"🥇 Highest now: *{hi[0]}* {hi[1]['last']} · lowest *{lo[0]}* {lo[1]['last']} (gap {gap:+.1f})")
+    else:
+        c, s = next(iter(stats.items()))
+        trend = "rising 📈" if s["window_change"] > 0 else "falling 📉" if s["window_change"] < 0 else "flat ➡️"
+        lines.append(f"📊 *{indicator_name}* — {trend} since {s['start_date']}")
     for c, s in stats.items():
-        arrow = "⬆️" if s["abs_change"] > 0 else "⬇️" if s["abs_change"] < 0 else "➡️"
-        lines.append(f"• {c}: {s['last']:.1f} ({arrow} {s['abs_change']:+.1f}, {s['pct_change']:+.1f}%)")
-    lines.append("• (AI summary unavailable — using numeric fallback)")
+        lines.append(
+            f"• *{c}*: {s['last']} {_emoji(s['abs_change'])} "
+            f"({s['window_pct']:+.1f}% since {s['start_date']}) · range {s['min']}–{s['max']}"
+        )
     lines.append("")
-    lines.append(ECB_CITATION)
+    lines.append(citation)
     return "\n".join(lines)
 
 # --------------------------------------------------------------
