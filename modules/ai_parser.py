@@ -70,6 +70,27 @@ def detect_all_countries(text: str) -> list[str]:
     codes = [code for name, code in COUNTRY_CODES.items() if name in text]
     return list(dict.fromkeys(codes))  # dedup, keep first occurrence
 
+# Italian NUTS-2 regions (+ direct code passthrough). Enables regional queries
+# like "popolazione Puglia" or "median age Lombardia vs Lazio".
+REGION_CODES = {
+    "piemonte": "ITC1", "valle d'aosta": "ITC2", "liguria": "ITC3", "lombardia": "ITC4",
+    "bolzano": "ITH1", "trento": "ITH2", "veneto": "ITH3", "friuli": "ITH4",
+    "emilia-romagna": "ITH5", "emilia romagna": "ITH5",
+    "toscana": "ITI1", "umbria": "ITI2", "marche": "ITI3", "lazio": "ITI4",
+    "abruzzo": "ITF1", "molise": "ITF2", "campania": "ITF3", "puglia": "ITF4",
+    "basilicata": "ITF5", "calabria": "ITF6", "sicilia": "ITG1", "sardegna": "ITG2",
+}
+
+def detect_all_regions(text: str) -> list[str]:
+    """NUTS-2 region codes named in the query (Italian regions or raw codes).
+    Word-boundary match: 'popolazione' must not trigger 'lazio'."""
+    t = text.lower()
+    codes = [code for name, code in REGION_CODES.items()
+             if re.search(rf"\b{re.escape(name)}\b", t)]
+    # also accept an explicit NUTS-2 code typed directly, e.g. 'ITF4', 'DEA2'
+    codes += re.findall(r"\b([A-Z]{2}[0-9A-Z]{2})\b", text)
+    return list(dict.fromkeys(codes))
+
 # -------------------------------------------------------------
 # ⏱️ Period detection
 # -------------------------------------------------------------
@@ -172,6 +193,20 @@ INDICATOR_CATALOG = {
         "dataset": "sts_inpr_m",
         "params": {"indic_bt": "PRD", "nace_r2": "B-D", "s_adj": "SCA", "unit": "I15"},
         "label": "Industrial production index"
+    },
+    "population": {
+        "provider": "Eurostat",
+        "dataset": "demo_pjan",
+        "params": {"sex": "T", "age": "TOTAL", "unit": "NR"},
+        "regional": {"dataset": "demo_r_d2jan", "params": {"sex": "T", "age": "TOTAL"}},
+        "label": "Population (1 January)"
+    },
+    "median_age": {
+        "provider": "Eurostat",
+        "dataset": "demo_pjanind",
+        "params": {"indic_de": "MEDAGEPOP"},
+        "regional": {"dataset": "demo_r_pjanind2", "params": {"indic_de": "MEDAGEPOP"}},
+        "label": "Median age of population"
     },
 
     # ==== FINANCIAL (ECB tested and stable) ====
@@ -292,6 +327,14 @@ SYNONYMS = {
     "hours_worked": [
         "hours worked", "working hours", "labour hours",
         "ore lavorate", "ore di lavoro",
+    ],
+    "median_age": [
+        "median age", "average age", "ageing", "aging",
+        "età media", "eta media", "invecchiamento",
+    ],
+    "population": [
+        "population", "inhabitants", "demographics", "how many people",
+        "popolazione", "abitanti", "residenti", "numero di abitanti",
     ],
 
     # ==== FINANCIAL ====
@@ -512,6 +555,12 @@ def interpret_query_with_ai(user_text: str):
                 "geo_template": geo_template, "freq": meta["freq"],
                 "indicator": meta["label"], "params": params, "geos": plan_geos}
     elif meta["provider"] == "Eurostat":
+        regions = detect_all_regions(user_text)
+        if regions and meta.get("regional"):  # NUTS-2 regional variant
+            r = meta["regional"]
+            return {"provider": "Eurostat", "dataset": r["dataset"],
+                    "eu_params": r["params"], "params": params,
+                    "indicator": f"{meta['label']} — regional", "geos": regions}
         plan_geos = geos or ["EA"]
         return {"provider": "Eurostat", "dataset": meta["dataset"],
                 "eu_params": meta["params"], "params": params,

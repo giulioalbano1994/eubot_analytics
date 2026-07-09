@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from config.settings import TELEGRAM_TOKEN
 import pandas as pd
@@ -22,6 +22,7 @@ from modules.plotter import plot_timeseries
 from modules.data_commenter import summarize_trend
 from modules.fetchers.eurostat_adapter import fetch_eurostat_data
 from modules.interaction_log import log_interaction
+from modules.eurostat_search import search as eurostat_search, fetch_auto as eurostat_fetch_auto
 
 
 # --------------------------------------------------------------
@@ -37,38 +38,33 @@ dp = Dispatcher()
 # exact same NL pipeline as a typed message, so menu == typing.
 # --------------------------------------------------------------
 MENUS = {
-    "growth": ("📊 Growth & Output", [
-        ("📈 Real GDP", "GDP Euro area since 2015"),
-        ("💵 GDP per capita (PPS)", "GDP per capita Euro area"),
-        ("🚀 GDP growth (QoQ)", "GDP growth Euro area since 2019"),
-        ("🏭 Industrial production", "Industrial production Euro area since 2018"),
-        ("⏱ Hours worked", "Hours worked Euro area"),
-    ]),
-    "prices": ("💶 Prices & Cost of Living", [
-        ("📉 Inflation (HICP YoY)", "Inflation Euro area since 2020"),
-        ("🏠 House prices (YoY)", "House prices Euro area since 2018"),
-        ("💼 Labour cost index", "Labour cost Euro area since 2018"),
-    ]),
-    "labour": ("👥 Labour Market", [
-        # une_rt_m has no euro-area aggregate → default to a country compare.
-        ("👷 Unemployment (IT vs FR)", "Unemployment Italy vs France since 2018"),
-        ("🧑‍💼 Employment rate", "Employment Euro area since 2015"),
-        ("🤝 Poverty / social exclusion", "Poverty rate Italy vs Spain"),
-    ]),
-    "public": ("🏛 Public Finance", [
-        ("💸 Government debt (% GDP)", "Public debt Euro area since 2015"),
-        ("📊 Deficit / surplus (% GDP)", "Government deficit Euro area since 2015"),
-    ]),
-    "money": ("💰 Money & Rates", [
+    "ecb": ("🏦 ECB — Monetary & Markets", [
+        ("📉 Inflation (HICP)", "Inflation Euro area since 2020"),
         ("🏦 Deposit facility rate", "ECB deposit rate"),
         ("🏛 Main refinancing rate", "Main refinancing operations ECB"),
         ("🏠 Cost of borrowing (households)", "Cost of borrowing euro area"),
         ("📈 Yield curve 10Y (AAA)", "Yield curve euro area"),
-        ("🌍 10Y bond yield (per country)", "Bond yield Italy"),
         ("💵 Money supply (M3)", "Money supply euro area"),
         ("💳 Loans to households", "Loans to households euro area"),
+        ("📊 Real GDP", "GDP Euro area since 2015"),
+        ("💶 GDP per capita (PPS)", "GDP per capita Euro area"),
+        ("⏱ Hours worked", "Hours worked Euro area"),
     ]),
-    "fx": ("💱 Exchange Rates", [
+    "eurostat": ("🇪🇺 Eurostat — Economy & Society", [
+        ("👷 Unemployment (IT vs FR)", "Unemployment Italy vs France since 2018"),
+        ("🧑‍💼 Employment rate", "Employment Euro area since 2015"),
+        ("🤝 Poverty / social exclusion", "Poverty rate Italy vs Spain"),
+        ("💸 Government debt (% GDP)", "Public debt Euro area since 2015"),
+        ("📊 Deficit / surplus (% GDP)", "Government deficit Euro area since 2015"),
+        ("🏭 Industrial production", "Industrial production Euro area since 2018"),
+        ("🚀 GDP growth (QoQ)", "GDP growth Euro area since 2019"),
+        ("🏠 House prices (YoY)", "House prices Euro area since 2018"),
+        ("💼 Labour cost index", "Labour cost Euro area since 2018"),
+        ("🌍 10Y bond yield (per country)", "Bond yield Italy"),
+        ("👥 Population", "Population Italy"),
+        ("🎂 Median age", "Median age Italy"),
+    ]),
+    "fx": ("💱 Exchange Rates (ECB)", [
         ("🇪🇺🇺🇸 EUR/USD", "Exchange rate euro dollar"),
         ("🇪🇺🇬🇧 EUR/GBP", "Exchange rate euro pound"),
         ("🇪🇺🇯🇵 EUR/JPY", "Exchange rate euro yen"),
@@ -154,7 +150,65 @@ async def info_message(message: types.Message):
 
 @dp.message(F.text.in_(["🚀 Start"]))
 async def start_menu(message: types.Message):
-    await message.answer("Choose an indicator category:", reply_markup=menu_root())
+    await message.answer("Choose a source / category:", reply_markup=menu_root())
+
+
+# --------------------------------------------------------------
+# Search ANY Eurostat dataset
+# --------------------------------------------------------------
+async def do_search(message: types.Message, keyword: str):
+    keyword = (keyword or "").strip()
+    if not keyword:
+        await message.answer("Usage: `/search <keywords>` — e.g. `/search tourism nights`",
+                             parse_mode="Markdown")
+        return
+    await message.answer(f"🔎 Searching Eurostat for _{keyword}_…", parse_mode="Markdown")
+    try:
+        hits = eurostat_search(keyword, 8)
+    except Exception as e:
+        await message.answer(f"❌ Search failed:\n`{e}`", parse_mode="Markdown")
+        return
+    if not hits:
+        await message.answer("No dataset matched. Try fewer or different words.")
+        return
+    rows = [[InlineKeyboardButton(text=title[:60], callback_data=f"ds:{code}")]
+            for code, title in hits]
+    await message.answer(f"Found {len(hits)} datasets — tap to chart:",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.message(Command("search"))
+async def cmd_search(message: types.Message, command: CommandObject):
+    await do_search(message, command.args or "")
+
+async def _handle_dataset(message: types.Message, code: str):
+    uid = message.from_user.id if message.from_user else ""
+    await message.answer(f"📡 Fetching dataset `{code}`…", parse_mode="Markdown")
+    try:
+        df, selection, geo = eurostat_fetch_auto(code)
+        if df is None or df.empty:
+            await message.answer(
+                f"⚠️ Couldn't fetch `{code}` for a default geography — it may need "
+                f"specific filters or a region.", parse_mode="Markdown")
+            log_interaction(user_id=uid, query=f"dataset:{code}", provider="Eurostat",
+                            indicator=code, n_obs=0, status="empty")
+            return
+        buf = plot_timeseries(df[["TIME_PERIOD", "OBS_VALUE"]], title=code)
+        slice_txt = ", ".join(f"{k}={v}" for k, v in selection.items()) if selection else "single series"
+        photo = BufferedInputFile(buf.getvalue(), filename="chart.png")
+        await message.answer_photo(
+            photo=photo,
+            caption=f"*{code}*  ·  geo `{geo}`\n_slice: {slice_txt}_\n_Source: Eurostat (CC BY 4.0)_",
+            parse_mode="Markdown")
+        summary = summarize_trend(df, indicator_name=code, provider="Eurostat")
+        if summary:
+            await message.answer(summary, parse_mode="Markdown")
+        log_interaction(user_id=uid, query=f"dataset:{code}", provider="Eurostat",
+                        indicator=code, n_obs=len(df), status="ok")
+    except Exception as e:
+        logging.exception("❌ dataset fetch error:")
+        await message.answer(f"❌ Error fetching `{code}`:\n`{e}`", parse_mode="Markdown")
+        log_interaction(user_id=uid, query=f"dataset:{code}", provider="Eurostat",
+                        indicator=code, n_obs="", status="error", error=str(e))
 
 
 # --------------------------------------------------------------
@@ -167,8 +221,13 @@ async def cb_category(callback: types.CallbackQuery):
         await callback.message.edit_text("Choose a category:", reply_markup=menu_root())
     else:
         title, _ = MENUS[key]
-        await callback.message.edit_text(f"*{title}*\nPick an indicator, or type e.g. `… Italy vs France`",
-                                         parse_mode="Markdown", reply_markup=menu_section(key))
+        await callback.message.edit_text(
+            f"*{title}*\n\n"
+            "Tap an indicator, or type your own:\n"
+            "• compare: `… Italy vs France`\n"
+            "• region: `Popolazione Puglia`\n"
+            "• any dataset: `/search tourism nights`",
+            parse_mode="Markdown", reply_markup=menu_section(key))
     await callback.answer()
 
 # --------------------------------------------------------------
@@ -178,6 +237,9 @@ async def process_text_query(message: types.Message, text: str):
     """Interpreta la query, scarica i dati, disegna grafico e commenta."""
     if text.strip() in {"🚀 Start", "ℹ️ Info"}:
         return
+    low = text.strip().lower()
+    if low.startswith(("search ", "cerca ")):  # natural-language dataset search
+        return await do_search(message, text.strip().split(" ", 1)[1])
     logging.info(f"🧠 Query: {text}")
     plan = parse_message_to_query(text)
     if isinstance(plan, list):
@@ -300,10 +362,15 @@ async def cb_run_query(callback: types.CallbackQuery):
     await callback.message.answer(f"🧠 _{query_text}_", parse_mode="Markdown")
     await process_text_query(callback.message, query_text)
 
+@dp.callback_query(F.data.startswith("ds:"))
+async def cb_dataset(callback: types.CallbackQuery):
+    await callback.answer()
+    await _handle_dataset(callback.message, callback.data[3:].strip())
+
 # --------------------------------------------------------------
 # Free text (excludes commands and the reply-keyboard buttons)
 # --------------------------------------------------------------
-@dp.message(~CommandStart(), ~Command("help"), ~F.text.in_({"ℹ️ Info", "🚀 Start"}))
+@dp.message(~CommandStart(), ~Command("help"), ~Command("search"), ~F.text.in_({"ℹ️ Info", "🚀 Start"}))
 async def any_text(message: types.Message):
     await process_text_query(message, message.text.strip())
 
