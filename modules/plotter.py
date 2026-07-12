@@ -24,39 +24,49 @@ logger = logging.getLogger(__name__)
 # =============================================================
 # 📈 TIME SERIES PLOT
 # =============================================================
+PALETTE = ["#2563eb", "#dc2626", "#059669", "#d97706",
+           "#7c3aed", "#0891b2", "#db2777", "#65a30d"]
+INK, MUTE, GRID = "#1f2937", "#6b7280", "#e5e7eb"
+
+
 def plot_timeseries(df: pd.DataFrame, title: str = "Time Series") -> io.BytesIO:
-    """Plot one or more time series and return a PNG buffer."""
-    if df.empty:
+    """Plot one or more time series (modern, clean) and return a PNG buffer."""
+    if df is None or (hasattr(df, "empty") and df.empty):
         raise ValueError("Empty DataFrame received for plotting.")
 
     if "TIME_PERIOD" in df.columns and "OBS_VALUE" in df.columns:
-        df = df.set_index("TIME_PERIOD")["OBS_VALUE"].to_frame()
-
+        df = df.set_index("TIME_PERIOD")["OBS_VALUE"].to_frame(name="")
     if isinstance(df, pd.Series):
-        df = df.to_frame(name="Value")
-
+        df = df.to_frame(name="")
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index, errors="coerce")
-
     df = df.sort_index()
 
-    fig, ax = plt.subplots(figsize=(12, 8))
-    plt.style.use("default")
+    n, multi = len(df), df.shape[1] > 1
+    marker = "o" if n <= 60 else None  # markers only when points are sparse
+    fig, ax = plt.subplots(figsize=(11, 6.2), dpi=200)
 
-    for col in df.columns:
-        ax.plot(df.index, df[col], label=str(col), linewidth=2)
+    for i, col in enumerate(df.columns):
+        c = PALETTE[i % len(PALETTE)]
+        ax.plot(df.index, df[col], color=c, linewidth=2.4, label=str(col),
+                marker=marker, markersize=5, markerfacecolor="white",
+                markeredgecolor=c, markeredgewidth=1.5)
 
-    ax.set_title(title, fontsize=16, fontweight="bold", pad=20)
-    ax.set_xlabel("Time", fontsize=13)
-    ax.set_ylabel("Value", fontsize=13)
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(title="Country", fontsize=10, loc="best")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
+    fig.suptitle(title, fontsize=16, fontweight="bold", color=INK, x=0.04, ha="left", y=0.98)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=MUTE)
+    ax.margins(x=0.02)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    if multi:
+        ax.legend(frameon=False, ncol=min(df.shape[1], 4), loc="best", fontsize=10)
+    fig.text(0.98, 0.01, "Source: ECB · Eurostat", ha="right", fontsize=8, color="#b0b4bb")
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=200)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.95))
+    fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     logger.info("✅ Time series chart generated successfully.")
